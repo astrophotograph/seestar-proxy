@@ -1,0 +1,22 @@
+[package]
+name = "seestar-proxy"
+version = "0.1.0"
+edition = "2024"
+description = "TCP proxy and multiplexer for Seestar smart telescopes"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = "0.4"
+anyhow = "1"
+
+[profile.release]
+opt-level = "s"    # Optimize for size (good for Pi)
+lto = true
+strip = true
+codegen-units = 1
