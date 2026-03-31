@@ -1,13 +1,7 @@
-mod config;
-mod control;
-mod discovery;
-mod imaging;
-mod protocol;
-mod recorder;
-
 use clap::Parser;
-use config::Config;
-use recorder::Recorder;
+use seestar_proxy::{control, discovery, imaging, protocol};
+use seestar_proxy::config::Config;
+use seestar_proxy::recorder::Recorder;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
