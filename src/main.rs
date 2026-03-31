@@ -1,5 +1,5 @@
 use clap::Parser;
-use seestar_proxy::{control, discovery, imaging, protocol};
+use seestar_proxy::{control, dashboard, discovery, imaging, protocol};
 use seestar_proxy::config::Config;
 use seestar_proxy::recorder::Recorder;
 use std::net::SocketAddr;
@@ -56,6 +56,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Set up dashboard if requested.
+    let dashboard_state = config.dashboard.map(|_| {
+        Arc::new(dashboard::DashboardState::new())
+    });
+
     println!("Seestar Proxy");
     println!("=============");
     println!(
@@ -73,18 +78,36 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref dir) = config.record {
         println!("  Recording:  {}", dir.display());
     }
+    if let Some(port) = config.dashboard {
+        println!("  Dashboard:  http://{}:{}", config.bind, port);
+    }
     println!();
 
+    // Spawn dashboard server.
+    let dashboard_handle = if let Some(port) = config.dashboard {
+        let ds = dashboard_state.clone().unwrap();
+        let bind = config.bind;
+        Some(tokio::spawn(async move {
+            if let Err(e) = dashboard::run(SocketAddr::new(bind, port), ds).await {
+                error!("Dashboard error: {}", e);
+            }
+        }))
+    } else {
+        None
+    };
+
     let recorder_c = recorder.clone();
+    let ds_c = dashboard_state.clone();
     let control_handle = tokio::spawn(async move {
-        if let Err(e) = control::run(bind_control, upstream_control, recorder_c).await {
+        if let Err(e) = control::run(bind_control, upstream_control, recorder_c, ds_c).await {
             error!("Control proxy error: {}", e);
         }
     });
 
     let recorder_i = recorder.clone();
+    let ds_i = dashboard_state.clone();
     let imaging_handle = tokio::spawn(async move {
-        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, recorder_i).await {
+        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, recorder_i, ds_i).await {
             error!("Imaging proxy error: {}", e);
         }
     });
@@ -112,6 +135,9 @@ async fn main() -> anyhow::Result<()> {
     control_handle.abort();
     imaging_handle.abort();
     if let Some(h) = discovery_handle {
+        h.abort();
+    }
+    if let Some(h) = dashboard_handle {
         h.abort();
     }
 

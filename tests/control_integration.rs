@@ -118,7 +118,7 @@ async fn start_event_on_request_telescope(event_json: &'static str) -> SocketAdd
 /// Start the control proxy and wait until its listen port is open.
 async fn start_proxy(telescope_addr: SocketAddr) -> SocketAddr {
     let proxy_addr = free_addr();
-    tokio::spawn(seestar_proxy::control::run(proxy_addr, telescope_addr, None));
+    tokio::spawn(seestar_proxy::control::run(proxy_addr, telescope_addr, None, None));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
     proxy_addr
 }
@@ -332,6 +332,7 @@ async fn proxy_records_control_traffic() {
         proxy_addr,
         telescope_addr,
         Some(recorder.clone()),
+        None,
     ));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
 
@@ -387,6 +388,7 @@ async fn recorder_logs_each_message_exactly_once() {
         proxy_addr,
         telescope_addr,
         Some(recorder.clone()),
+        None,
     ));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
 

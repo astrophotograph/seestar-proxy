@@ -7,8 +7,10 @@
 //! The imaging port also uses JSON-RPC `test_connection` heartbeats (sent
 //! as text, not binary) to keep the connection alive.
 
+use crate::dashboard::DashboardState;
 use crate::protocol::{FrameHeader, HEADER_SIZE};
 use crate::recorder::Recorder;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -20,6 +22,7 @@ pub async fn run(
     bind_addr: std::net::SocketAddr,
     upstream_addr: std::net::SocketAddr,
     recorder: Option<Arc<Recorder>>,
+    dashboard: Option<Arc<DashboardState>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Imaging proxy listening on {}", bind_addr);
@@ -32,6 +35,10 @@ pub async fn run(
         let (client_stream, client_addr) = listener.accept().await?;
         let _ = client_stream.set_nodelay(true);
         info!("Imaging client connected: {}", client_addr);
+        if let Some(ds) = &dashboard {
+            ds.imaging_client_count.fetch_add(1, Ordering::Relaxed);
+            ds.add_client(client_addr, "imaging").await;
+        }
 
         // Connect upstream on first imaging client.
         if !upstream_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -47,7 +54,7 @@ pub async fn run(
                     info!("Connected to telescope imaging at {}", upstream_addr);
                     let (upstream_reader, upstream_writer) = upstream.into_split();
                     let frame_tx_r = frame_tx.clone();
-                    tokio::spawn(upstream_reader_task(upstream_reader, frame_tx_r, recorder.clone()));
+                    tokio::spawn(upstream_reader_task(upstream_reader, frame_tx_r, recorder.clone(), dashboard.clone()));
                     tokio::spawn(imaging_heartbeat_task(upstream_writer));
                 }
                 Ok(Err(e)) => {
@@ -60,9 +67,14 @@ pub async fn run(
         }
 
         let frame_rx = frame_tx.subscribe();
+        let dashboard_c = dashboard.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_client(client_stream, frame_rx).await {
                 debug!("Imaging client {} error: {}", client_addr, e);
+            }
+            if let Some(ds) = &dashboard_c {
+                ds.imaging_client_count.fetch_sub(1, Ordering::Relaxed);
+                ds.remove_client(client_addr).await;
             }
             info!("Imaging client disconnected: {}", client_addr);
         });
@@ -99,6 +111,7 @@ async fn upstream_reader_task(
     mut reader: impl AsyncReadExt + Unpin,
     frame_tx: broadcast::Sender<Arc<Vec<u8>>>,
     recorder: Option<Arc<Recorder>>,
+    dashboard: Option<Arc<DashboardState>>,
 ) {
     let mut header_buf = [0u8; HEADER_SIZE];
 
@@ -143,6 +156,12 @@ async fn upstream_reader_task(
         }
 
         let _ = frame_tx.send(frame);
+
+        if header.is_image() {
+            if let Some(ds) = &dashboard {
+                ds.imaging_frames.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     info!("Upstream imaging reader stopped");
@@ -210,7 +229,7 @@ mod tests {
         let mut rx1 = frame_tx.subscribe();
         let mut rx2 = frame_tx.subscribe();
 
-        tokio::spawn(upstream_reader_task(server, frame_tx, None));
+        tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
 
         let header = make_header(5, 0, 0, 0);
         mock_telescope.write_all(&header).await.unwrap();
@@ -239,7 +258,7 @@ mod tests {
         let (mut mock_telescope, server) = loopback_pair().await;
         let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(16);
 
-        let task = tokio::spawn(upstream_reader_task(server, frame_tx, None));
+        let task = tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
 
         // Claim payload is 60 MB — exceeds the 50 MB sanity limit
         let header = make_header(60_000_000, 20, 1920, 1080);
@@ -259,7 +278,7 @@ mod tests {
         let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(16);
         let mut rx = frame_tx.subscribe();
 
-        tokio::spawn(upstream_reader_task(server, frame_tx, None));
+        tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
 
         let header = make_header(4, 21, 640, 480);
         let payload = [0x01u8, 0x02, 0x03, 0x04];
@@ -283,7 +302,7 @@ mod tests {
         let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(16);
         let mut rx = frame_tx.subscribe();
 
-        tokio::spawn(upstream_reader_task(server, frame_tx, None));
+        tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
 
         for i in 0u8..3 {
             let header = make_header(1, 21, 10, 10);

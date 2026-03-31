@@ -45,6 +45,10 @@ pub struct Config {
     #[arg(long, short)]
     pub record: Option<std::path::PathBuf>,
 
+    /// Enable the web dashboard on the given port (e.g., --dashboard 8080)
+    #[arg(long)]
+    pub dashboard: Option<u16>,
+
     /// Raw pipe mode — forward bytes transparently without JSON parsing or
     /// ID remapping. Useful for diagnostics (single client only).
     #[arg(long)]
