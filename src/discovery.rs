@@ -39,7 +39,8 @@ pub async fn run(
     socket.set_broadcast(true)?;
     info!("Discovery bridge listening on {}", listen_addr);
 
-    let mut buf = [0u8; 4096];
+    // 16 KiB covers any realistic JSON device-info payload.
+    let mut buf = [0u8; 16_384];
 
     loop {
         let (n, src_addr) = match socket.recv_from(&mut buf).await {
@@ -123,7 +124,7 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
     // Send probe and wait for response (with timeout).
     socket.send_to(&probe_bytes, target).await?;
 
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 16_384];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let (n, src) = socket.recv_from(&mut buf).await?;
