@@ -1,5 +1,5 @@
 use clap::Parser;
-use seestar_proxy::{control, dashboard, discovery, imaging, protocol};
+use seestar_proxy::{control, dashboard, discovery, imaging, metrics, protocol};
 use seestar_proxy::config::Config;
 use seestar_proxy::recorder::Recorder;
 use std::net::SocketAddr;
@@ -25,16 +25,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let upstream_control = SocketAddr::new(config.upstream.into(), config.upstream_control_port);
-    let upstream_imaging = SocketAddr::new(config.upstream.into(), config.upstream_imaging_port);
+    let upstream_host = config.upstream.as_deref().unwrap_or("seestar.local");
+    let upstream_ip = resolve_host(upstream_host).await?;
+
+    let upstream_control = SocketAddr::new(upstream_ip, config.upstream_control_port);
+    let upstream_imaging = SocketAddr::new(upstream_ip, config.upstream_imaging_port);
     let bind_control = SocketAddr::new(config.bind, config.control_port);
     let bind_imaging = SocketAddr::new(config.bind, config.imaging_port);
+
+    let proxy_metrics = metrics::Metrics::new();
 
     if config.raw {
         // ─── Raw pipe mode ───────────────────────────────────────────
         println!("Seestar Proxy (RAW PIPE MODE)");
         println!("=============================");
         println!("  Upstream:   {} (control), {} (imaging)", upstream_control, upstream_imaging);
+
         println!("  Listening:  {} (control), {} (imaging)", bind_control, bind_imaging);
         println!("  Mode:       transparent byte pipe (no parsing, single client)");
         println!();
@@ -56,17 +62,12 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Set up dashboard if requested.
-    let dashboard_state = config.dashboard.map(|_| {
-        Arc::new(dashboard::DashboardState::new())
-    });
-
     println!("Seestar Proxy");
     println!("=============");
     println!(
         "  Upstream:   {}:{} (control), {}:{} (imaging)",
-        config.upstream, config.upstream_control_port,
-        config.upstream, config.upstream_imaging_port,
+        upstream_ip, config.upstream_control_port,
+        upstream_ip, config.upstream_imaging_port,
     );
     println!(
         "  Listening:  {} (control), {} (imaging)",
@@ -78,43 +79,41 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref dir) = config.record {
         println!("  Recording:  {}", dir.display());
     }
-    if let Some(port) = config.dashboard {
-        println!("  Dashboard:  http://{}:{}", config.bind, port);
-    }
-    println!();
 
-    // Spawn dashboard server.
-    let dashboard_handle = if let Some(port) = config.dashboard {
-        let ds = dashboard_state.clone().unwrap();
-        let bind = config.bind;
+    let dashboard_handle = if config.dashboard_port != 0 {
+        let bind_dash = std::net::SocketAddr::new(config.bind, config.dashboard_port);
+        let display_host = if config.bind.is_unspecified() { "localhost".to_string() } else { config.bind.to_string() };
+        println!("  Dashboard:  http://{}:{}", display_host, config.dashboard_port);
+        let metrics_d = proxy_metrics.clone();
         Some(tokio::spawn(async move {
-            if let Err(e) = dashboard::run(SocketAddr::new(bind, port), ds).await {
+            if let Err(e) = dashboard::run(bind_dash, metrics_d).await {
                 error!("Dashboard error: {}", e);
             }
         }))
     } else {
         None
     };
+    println!();
 
     let recorder_c = recorder.clone();
-    let ds_c = dashboard_state.clone();
+    let metrics_c = proxy_metrics.clone();
     let control_handle = tokio::spawn(async move {
-        if let Err(e) = control::run(bind_control, upstream_control, recorder_c, ds_c).await {
+        if let Err(e) = control::run(bind_control, upstream_control, recorder_c, Some(metrics_c)).await {
             error!("Control proxy error: {}", e);
         }
     });
 
     let recorder_i = recorder.clone();
-    let ds_i = dashboard_state.clone();
+    let metrics_i = proxy_metrics.clone();
     let imaging_handle = tokio::spawn(async move {
-        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, recorder_i, ds_i).await {
+        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, recorder_i, Some(metrics_i)).await {
             error!("Imaging proxy error: {}", e);
         }
     });
 
     let discovery_handle = if config.discovery {
         let bind = config.bind;
-        let upstream = config.upstream;
+        let upstream = upstream_ip;
         let port = config.control_port;
         Some(tokio::spawn(async move {
             if let Err(e) = discovery::run(bind, upstream, port).await {
@@ -134,14 +133,33 @@ async fn main() -> anyhow::Result<()> {
 
     control_handle.abort();
     imaging_handle.abort();
-    if let Some(h) = discovery_handle {
+    if let Some(h) = dashboard_handle {
         h.abort();
     }
-    if let Some(h) = dashboard_handle {
+    if let Some(h) = discovery_handle {
         h.abort();
     }
 
     Ok(())
+}
+
+/// Resolve a hostname or IP string to an [`IpAddr`].
+///
+/// If the input is already a valid IP address it is returned as-is.
+/// Otherwise a DNS lookup is performed and the first result is used.
+async fn resolve_host(host: &str) -> anyhow::Result<std::net::IpAddr> {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(ip);
+    }
+    let addrs: Vec<_> = tokio::net::lookup_host(format!("{}:0", host))
+        .await
+        .map_err(|e| anyhow::anyhow!("Could not resolve '{}': {}", host, e))?
+        .collect();
+    addrs
+        .into_iter()
+        .map(|a| a.ip())
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No addresses found for '{}'", host))
 }
 
 /// Raw transparent pipe: accept one client, connect to upstream,

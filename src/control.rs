@@ -7,7 +7,7 @@
 //! - Broadcasts async events (no `id`) to all connected clients
 //! - Sends heartbeats only after handshake completes
 
-use crate::dashboard::{DashboardMessage, DashboardState};
+use crate::metrics::Metrics;
 use crate::protocol;
 use crate::recorder::Recorder;
 use serde_json::Value;
@@ -47,7 +47,7 @@ pub async fn run(
     bind_addr: std::net::SocketAddr,
     upstream_addr: std::net::SocketAddr,
     recorder: Option<Arc<Recorder>>,
-    dashboard: Option<Arc<DashboardState>>,
+    metrics: Option<Arc<Metrics>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Control proxy listening on {}", bind_addr);
@@ -75,10 +75,9 @@ pub async fn run(
         let next_id = next_id.clone();
         let handshake_done = handshake_done.clone();
         let upstream_tx_hb = upstream_tx.clone();
-        let dashboard_upstream = dashboard.clone();
+        let metrics_up = metrics.clone();
 
         tokio::spawn(async move {
-            let dashboard = dashboard_upstream;
             // Wait until a client connects.
             upstream_started.notified().await;
 
@@ -109,14 +108,14 @@ pub async fn run(
             let event_tx_r = event_tx;
             let recorder_r = recorder;
             let handshake_done_r = handshake_done.clone();
-            let dashboard_r = dashboard;
+            let metrics_r = metrics_up.clone();
             tokio::spawn(upstream_reader_task(
                 upstream_reader,
                 state_r,
                 event_tx_r,
                 recorder_r,
                 handshake_done_r,
-                dashboard_r,
+                metrics_r,
             ));
 
             // Spawn upstream writer (reads from channel, writes to socket).
@@ -174,13 +173,11 @@ pub async fn run(
         let state = state.clone();
         let next_id = next_id.clone();
         let recorder = recorder.clone();
-        let dashboard = dashboard.clone();
+        let metrics_c = metrics.clone();
 
-        if let Some(ds) = &dashboard {
-            ds.control_client_count.fetch_add(1, Ordering::Relaxed);
-            ds.add_client(client_addr, "control").await;
+        if let Some(m) = &metrics {
+            m.control_clients.fetch_add(1, Ordering::Relaxed);
         }
-
         tokio::spawn(async move {
             if let Err(e) = handle_client(
                 client_stream,
@@ -189,15 +186,14 @@ pub async fn run(
                 state,
                 next_id,
                 recorder,
-                dashboard.clone(),
+                metrics_c.clone(),
             )
             .await
             {
                 warn!("Control client {} error: {}", client_addr, e);
             }
-            if let Some(ds) = &dashboard {
-                ds.control_client_count.fetch_sub(1, Ordering::Relaxed);
-                ds.remove_client(client_addr).await;
+            if let Some(m) = &metrics_c {
+                m.control_clients.fetch_sub(1, Ordering::Relaxed);
             }
             info!("Control client disconnected: {}", client_addr);
         });
@@ -212,7 +208,7 @@ async fn handle_client(
     state: Arc<Mutex<ControlState>>,
     next_id: Arc<AtomicU64>,
     recorder: Option<Arc<Recorder>>,
-    dashboard: Option<Arc<DashboardState>>,
+    metrics: Option<Arc<Metrics>>,
 ) -> anyhow::Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -285,6 +281,13 @@ async fn handle_client(
         if let Some(recorder) = &recorder {
             recorder.record_control("client", trimmed).await;
         }
+        if let Some(m) = &metrics {
+            m.control_tx.fetch_add(1, Ordering::Relaxed);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                let method = crate::protocol::method_name(&v).unwrap_or("?");
+                m.push_log("ctrl-tx", format!("{}", method));
+            }
+        }
 
         let mut msg: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
@@ -347,23 +350,6 @@ async fn handle_client(
                 remapped_id
             );
 
-            // Dashboard: record client request.
-            if let Some(ds) = &dashboard {
-                ds.messages_from_clients.fetch_add(1, Ordering::Relaxed);
-                let method = protocol::method_name(&msg).unwrap_or("?").to_string();
-                ds.record_method(&method).await;
-                ds.tap(DashboardMessage {
-                    timestamp: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs_f64(),
-                    direction: "client -> telescope",
-                    method: Some(method),
-                    event: None,
-                    preview: forwarded[..forwarded.len().min(200)].to_string(),
-                });
-            }
-
             if upstream_tx.send(forwarded).await.is_err() {
                 error!("Upstream channel closed — telescope connection lost");
                 break;
@@ -371,9 +357,6 @@ async fn handle_client(
         } else {
             // No id field — forward as-is (notification).
             let forwarded = serde_json::to_string(&msg)?;
-            if let Some(ds) = &dashboard {
-                ds.messages_from_clients.fetch_add(1, Ordering::Relaxed);
-            }
             if upstream_tx.send(forwarded).await.is_err() {
                 error!("Upstream channel closed — telescope connection lost");
                 break;
@@ -423,9 +406,12 @@ async fn upstream_reader_task(
     event_tx: broadcast::Sender<String>,
     recorder: Option<Arc<Recorder>>,
     handshake_done: Arc<AtomicBool>,
-    dashboard: Option<Arc<DashboardState>>,
+    metrics: Option<Arc<Metrics>>,
 ) {
     info!("Upstream reader started, waiting for telescope messages...");
+    if let Some(m) = &metrics {
+        m.upstream_control_up.store(true, Ordering::Relaxed);
+    }
 
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut tmp = [0u8; 32 * 1024];
@@ -503,39 +489,18 @@ async fn upstream_reader_task(
                 }
             };
 
-            // Dashboard: record telescope message.
-            if let Some(ds) = &dashboard {
-                ds.messages_from_telescope.fetch_add(1, Ordering::Relaxed);
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs_f64();
-                if protocol::is_event(&msg) {
-                    let event_type = msg.get("Event").and_then(|v| v.as_str()).unwrap_or("?").to_string();
-                    ds.record_event(&event_type, &msg).await;
-                    ds.tap(DashboardMessage {
-                        timestamp: now, direction: "telescope -> client",
-                        method: None, event: Some(event_type),
-                        preview: trimmed[..trimmed.len().min(200)].to_string(),
-                    });
-                } else {
-                    let method = protocol::method_name(&msg).map(|s| s.to_string());
-                    if let Some(ref m) = method { ds.record_method(m).await; }
-                    ds.tap(DashboardMessage {
-                        timestamp: now, direction: "telescope -> client",
-                        method, event: None,
-                        preview: trimmed[..trimmed.len().min(200)].to_string(),
-                    });
-                }
-            }
-
             if protocol::is_event(&msg) {
-                debug!(
-                    "Event: {}",
-                    msg.get("Event").and_then(|v| v.as_str()).unwrap_or("?")
-                );
+                let event_name = msg.get("Event").and_then(|v| v.as_str()).unwrap_or("?");
+                debug!("Event: {}", event_name);
+                if let Some(m) = &metrics {
+                    m.control_events.fetch_add(1, Ordering::Relaxed);
+                    m.push_log("ctrl-evt", event_name.to_string());
+                }
                 let _ = event_tx.send(trimmed);
             } else if let Some(remapped_id) = protocol::json_rpc_id(&msg) {
+                if let Some(m) = &metrics {
+                    m.control_rx.fetch_add(1, Ordering::Relaxed);
+                }
                 let pending = {
                     let mut st = state.lock().await;
                     st.pending.remove(&remapped_id)
@@ -547,12 +512,16 @@ async fn upstream_reader_task(
                     protocol::set_json_rpc_id_value(&mut response, pending.original_id.clone());
                     let response_str = serde_json::to_string(&response).unwrap_or_default();
 
+                    let method = protocol::method_name(&response).unwrap_or("?");
                     info!(
                         "Response routed: method={} id {} -> {:?}",
-                        protocol::method_name(&response).unwrap_or("?"),
+                        method,
                         remapped_id,
                         pending.original_id
                     );
+                    if let Some(m) = &metrics {
+                        m.push_log("ctrl-rx", method.to_string());
+                    }
 
                     if pending.client_tx.try_send(response_str).is_err() {
                         warn!("Client channel full/closed for id {:?}", pending.original_id);
@@ -573,6 +542,9 @@ async fn upstream_reader_task(
         }
     }
 
+    if let Some(m) = &metrics {
+        m.upstream_control_up.store(false, Ordering::Relaxed);
+    }
     error!("Upstream control reader stopped — telescope connection lost");
 }
 

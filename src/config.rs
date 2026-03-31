@@ -13,9 +13,9 @@ use std::net::IpAddr;
                   bridges UDP discovery broadcasts."
 )]
 pub struct Config {
-    /// Seestar telescope IP address
+    /// Seestar telescope IP address or hostname (default: resolves seestar.local)
     #[arg(long, short = 'u')]
-    pub upstream: IpAddr,
+    pub upstream: Option<String>,
 
     /// Seestar control port
     #[arg(long, default_value = "4700")]
@@ -45,14 +45,14 @@ pub struct Config {
     #[arg(long, short)]
     pub record: Option<std::path::PathBuf>,
 
-    /// Enable the web dashboard on the given port (e.g., --dashboard 8080)
-    #[arg(long)]
-    pub dashboard: Option<u16>,
-
     /// Raw pipe mode — forward bytes transparently without JSON parsing or
     /// ID remapping. Useful for diagnostics (single client only).
     #[arg(long)]
     pub raw: bool,
+
+    /// HTTP dashboard port (0 = disable)
+    #[arg(long, default_value = "4090")]
+    pub dashboard_port: u16,
 
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]

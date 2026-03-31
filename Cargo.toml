@@ -14,8 +14,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 anyhow = "1"
-axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
+axum = "0.7"
+futures-util = "0.3"
+
+[dev-dependencies]
+tower = "0.5"
 
 [profile.release]
 opt-level = "s"    # Optimize for size (good for Pi)

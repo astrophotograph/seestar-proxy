@@ -7,7 +7,7 @@
 //! The imaging port also uses JSON-RPC `test_connection` heartbeats (sent
 //! as text, not binary) to keep the connection alive.
 
-use crate::dashboard::DashboardState;
+use crate::metrics::Metrics;
 use crate::protocol::{FrameHeader, HEADER_SIZE};
 use crate::recorder::Recorder;
 use std::sync::atomic::Ordering;
@@ -22,7 +22,7 @@ pub async fn run(
     bind_addr: std::net::SocketAddr,
     upstream_addr: std::net::SocketAddr,
     recorder: Option<Arc<Recorder>>,
-    dashboard: Option<Arc<DashboardState>>,
+    metrics: Option<Arc<Metrics>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Imaging proxy listening on {}", bind_addr);
@@ -35,10 +35,6 @@ pub async fn run(
         let (client_stream, client_addr) = listener.accept().await?;
         let _ = client_stream.set_nodelay(true);
         info!("Imaging client connected: {}", client_addr);
-        if let Some(ds) = &dashboard {
-            ds.imaging_client_count.fetch_add(1, Ordering::Relaxed);
-            ds.add_client(client_addr, "imaging").await;
-        }
 
         // Connect upstream on first imaging client.
         if !upstream_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -54,7 +50,7 @@ pub async fn run(
                     info!("Connected to telescope imaging at {}", upstream_addr);
                     let (upstream_reader, upstream_writer) = upstream.into_split();
                     let frame_tx_r = frame_tx.clone();
-                    tokio::spawn(upstream_reader_task(upstream_reader, frame_tx_r, recorder.clone(), dashboard.clone()));
+                    tokio::spawn(upstream_reader_task(upstream_reader, frame_tx_r, recorder.clone(), metrics.clone()));
                     tokio::spawn(imaging_heartbeat_task(upstream_writer));
                 }
                 Ok(Err(e)) => {
@@ -67,14 +63,16 @@ pub async fn run(
         }
 
         let frame_rx = frame_tx.subscribe();
-        let dashboard_c = dashboard.clone();
+        let metrics_c = metrics.clone();
+        if let Some(m) = &metrics {
+            m.imaging_clients.fetch_add(1, Ordering::Relaxed);
+        }
         tokio::spawn(async move {
             if let Err(e) = handle_client(client_stream, frame_rx).await {
                 debug!("Imaging client {} error: {}", client_addr, e);
             }
-            if let Some(ds) = &dashboard_c {
-                ds.imaging_client_count.fetch_sub(1, Ordering::Relaxed);
-                ds.remove_client(client_addr).await;
+            if let Some(m) = &metrics_c {
+                m.imaging_clients.fetch_sub(1, Ordering::Relaxed);
             }
             info!("Imaging client disconnected: {}", client_addr);
         });
@@ -111,9 +109,13 @@ async fn upstream_reader_task(
     mut reader: impl AsyncReadExt + Unpin,
     frame_tx: broadcast::Sender<Arc<Vec<u8>>>,
     recorder: Option<Arc<Recorder>>,
-    dashboard: Option<Arc<DashboardState>>,
+    metrics: Option<Arc<Metrics>>,
 ) {
+    if let Some(m) = &metrics {
+        m.upstream_imaging_up.store(true, Ordering::Relaxed);
+    }
     let mut header_buf = [0u8; HEADER_SIZE];
+    let mut frame_count: u64 = 0;
 
     loop {
         // Read 80-byte header.
@@ -142,6 +144,27 @@ async fn upstream_reader_task(
             recorder.record_frame(&header_buf, &payload).await;
         }
 
+        if let Some(m) = &metrics {
+            m.imaging_frames.fetch_add(1, Ordering::Relaxed);
+            m.imaging_bytes.fetch_add((HEADER_SIZE + payload.len()) as u64, Ordering::Relaxed);
+            // Log every 30th frame to avoid flooding the traffic log.
+            frame_count += 1;
+            if frame_count % 30 == 1 {
+                let kind = match header.id {
+                    20 => "view",
+                    21 => "preview",
+                    23 => "stack",
+                    _  => "frame",
+                };
+                let summary = if header.is_image() {
+                    format!("{} {}x{} ({:.1} KB)", kind, header.width, header.height, header.size as f64 / 1024.0)
+                } else {
+                    format!("{} ({} bytes)", kind, header.size)
+                };
+                m.push_log("img", summary);
+            }
+        }
+
         // Build complete frame for broadcasting.
         let mut frame = Vec::with_capacity(HEADER_SIZE + payload.len());
         frame.extend_from_slice(&header_buf);
@@ -156,14 +179,11 @@ async fn upstream_reader_task(
         }
 
         let _ = frame_tx.send(frame);
-
-        if header.is_image() {
-            if let Some(ds) = &dashboard {
-                ds.imaging_frames.fetch_add(1, Ordering::Relaxed);
-            }
-        }
     }
 
+    if let Some(m) = &metrics {
+        m.upstream_imaging_up.store(false, Ordering::Relaxed);
+    }
     info!("Upstream imaging reader stopped");
 }
 
