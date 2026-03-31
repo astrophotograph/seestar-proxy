@@ -1,32 +1,31 @@
 //! Port 4700 control proxy — multiplexes JSON-RPC between multiple clients
 //! and a single upstream Seestar connection.
 //!
+//! - Connects to upstream lazily (when first client connects)
 //! - Rewrites `id` fields to avoid collisions between clients
 //! - Routes responses back to the originating client by mapped ID
 //! - Broadcasts async events (no `id`) to all connected clients
+//! - Sends heartbeats only after handshake completes
 
 use crate::protocol;
 use crate::recorder::Recorder;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex, Notify};
 use tracing::{debug, error, info, warn};
 
 /// A pending request awaiting a response from the telescope.
 struct PendingRequest {
-    /// Client that sent this request.
     client_tx: mpsc::Sender<String>,
-    /// Original ID from the client (to restore in the response).
     original_id: u64,
 }
 
 /// Shared state for the control proxy.
 struct ControlState {
-    /// Map from remapped ID → pending request info.
     pending: HashMap<u64, PendingRequest>,
 }
 
@@ -39,44 +38,109 @@ pub async fn run(
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Control proxy listening on {}", bind_addr);
 
-    // Global ID counter for remapping (avoids collisions across clients).
-    let next_id = Arc::new(AtomicU64::new(10_000));
-
-    // Channel for sending requests to the upstream writer.
-    let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
-
-    // Broadcast channel for events from the telescope to all clients.
+    let next_id = Arc::new(AtomicU64::new(100_000));
     let (event_tx, _) = broadcast::channel::<String>(256);
-
-    // Shared pending-request map.
     let state = Arc::new(Mutex::new(ControlState {
         pending: HashMap::new(),
     }));
 
-    // Connect to upstream telescope.
-    let upstream = TcpStream::connect(upstream_addr).await?;
-    info!("Connected to telescope control at {}", upstream_addr);
-    let (upstream_reader, upstream_writer) = upstream.into_split();
+    // Signal that the first response has arrived (handshake complete).
+    let handshake_done = Arc::new(AtomicBool::new(false));
 
-    // Spawn upstream writer task.
-    let recorder_w = recorder.clone();
-    tokio::spawn(upstream_writer_task(upstream_writer, upstream_rx, recorder_w));
+    // Upstream connection is established lazily — channel is created now,
+    // but the writer/reader tasks start when the first client connects.
+    let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
+    let upstream_started = Arc::new(Notify::new());
 
-    // Spawn upstream reader task.
-    let state_r = state.clone();
-    let event_tx_r = event_tx.clone();
-    let recorder_r = recorder.clone();
-    tokio::spawn(upstream_reader_task(
-        upstream_reader,
-        state_r,
-        event_tx_r,
-        recorder_r,
-    ));
+    // Spawn the upstream connection task (waits for first client).
+    {
+        let upstream_started = upstream_started.clone();
+        let state = state.clone();
+        let event_tx = event_tx.clone();
+        let recorder = recorder.clone();
+        let next_id = next_id.clone();
+        let handshake_done = handshake_done.clone();
+        let upstream_tx_hb = upstream_tx.clone();
+
+        tokio::spawn(async move {
+            // Wait until a client connects.
+            upstream_started.notified().await;
+
+            info!("First client connected — establishing upstream connection to {}...", upstream_addr);
+            let upstream = match TcpStream::connect(upstream_addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("Failed to connect to telescope: {}", e);
+                    return;
+                }
+            };
+            let _ = upstream.set_nodelay(true);
+            info!("Connected to telescope control at {}", upstream_addr);
+
+            let (upstream_reader, mut upstream_writer) = upstream.into_split();
+
+            // Spawn upstream reader.
+            let state_r = state;
+            let event_tx_r = event_tx;
+            let recorder_r = recorder;
+            let handshake_done_r = handshake_done.clone();
+            tokio::spawn(upstream_reader_task(
+                upstream_reader,
+                state_r,
+                event_tx_r,
+                recorder_r,
+                handshake_done_r,
+            ));
+
+            // Spawn upstream writer (reads from channel, writes to socket).
+            tokio::spawn(async move {
+                let mut rx = upstream_rx;
+                while let Some(msg) = rx.recv().await {
+                    debug!("-> telescope: {}", &msg[..msg.len().min(200)]);
+                    let line = format!("{}\r\n", msg);
+                    if let Err(e) = upstream_writer.write_all(line.as_bytes()).await {
+                        error!("Upstream write error: {}", e);
+                        break;
+                    }
+                }
+                info!("Upstream control writer stopped");
+            });
+
+            // Spawn heartbeat task — waits for handshake before starting.
+            tokio::spawn(async move {
+                // Wait for the first successful response before heartbeating.
+                while !handshake_done.load(Ordering::Relaxed) {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                info!("Handshake complete — starting heartbeat");
+
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    let id = next_id.fetch_add(1, Ordering::Relaxed);
+                    let msg = format!(r#"{{"id":{},"method":"test_connection"}}"#, id);
+                    debug!("Heartbeat: id={}", id);
+                    if upstream_tx_hb.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        });
+    }
+
+    let upstream_started_once = Arc::new(AtomicBool::new(false));
 
     // Accept client connections.
     loop {
         let (client_stream, client_addr) = listener.accept().await?;
+        let _ = client_stream.set_nodelay(true);
         info!("Control client connected: {}", client_addr);
+
+        // Trigger upstream connection on first client.
+        if !upstream_started_once.swap(true, Ordering::Relaxed) {
+            upstream_started.notify_one();
+            // Give the upstream connection a moment to establish.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
 
         let upstream_tx = upstream_tx.clone();
         let event_rx = event_tx.subscribe();
@@ -115,7 +179,6 @@ async fn handle_client(
     let mut reader = BufReader::new(reader);
     let writer = Arc::new(Mutex::new(writer));
 
-    // Per-client channel for receiving responses.
     let (response_tx, mut response_rx) = mpsc::channel::<String>(64);
 
     // Spawn task to forward events and responses to this client.
@@ -123,27 +186,29 @@ async fn handle_client(
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                // Responses addressed to this client.
                 Some(msg) = response_rx.recv() => {
                     let mut w = writer_c.lock().await;
-                    if w.write_all(msg.as_bytes()).await.is_err() {
-                        break;
-                    }
-                    if w.write_all(b"\r\n").await.is_err() {
+                    let line = format!("{}\r\n", msg);
+                    if w.write_all(line.as_bytes()).await.is_err() {
                         break;
                     }
                     let _ = w.flush().await;
                 }
-                // Broadcast events from the telescope.
-                Ok(msg) = event_rx.recv() => {
-                    let mut w = writer_c.lock().await;
-                    if w.write_all(msg.as_bytes()).await.is_err() {
-                        break;
+                result = event_rx.recv() => {
+                    match result {
+                        Ok(msg) => {
+                            let mut w = writer_c.lock().await;
+                            let line = format!("{}\r\n", msg);
+                            if w.write_all(line.as_bytes()).await.is_err() {
+                                break;
+                            }
+                            let _ = w.flush().await;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Client event receiver lagged by {} messages", n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    if w.write_all(b"\r\n").await.is_err() {
-                        break;
-                    }
-                    let _ = w.flush().await;
                 }
             }
         }
@@ -155,7 +220,7 @@ async fn handle_client(
         line.clear();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
-            break; // Client disconnected.
+            break;
         }
 
         let trimmed = line.trim();
@@ -167,7 +232,6 @@ async fn handle_client(
             recorder.record_control("client", trimmed).await;
         }
 
-        // Parse JSON-RPC request.
         let mut msg: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(_) => {
@@ -176,12 +240,10 @@ async fn handle_client(
             }
         };
 
-        // Remap the ID to avoid collisions.
         if let Some(original_id) = protocol::json_rpc_id(&msg) {
             let remapped_id = next_id.fetch_add(1, Ordering::Relaxed);
             protocol::set_json_rpc_id(&mut msg, remapped_id);
 
-            // Register the pending request.
             let mut st = state.lock().await;
             st.pending.insert(
                 remapped_id,
@@ -192,95 +254,151 @@ async fn handle_client(
             );
             drop(st);
 
-            debug!(
-                "Forwarding request: method={} id={} -> {}",
+            info!(
+                "Forwarding: method={} id {} -> {}",
                 protocol::method_name(&msg).unwrap_or("?"),
                 original_id,
                 remapped_id
             );
         }
 
-        // Forward to upstream.
         let forwarded = serde_json::to_string(&msg)?;
-        upstream_tx.send(forwarded).await?;
+        if upstream_tx.send(forwarded).await.is_err() {
+            error!("Upstream channel closed — telescope connection lost");
+            break;
+        }
     }
 
     Ok(())
 }
 
-/// Write requests to the upstream telescope connection.
-async fn upstream_writer_task(
-    mut writer: tokio::net::tcp::OwnedWriteHalf,
-    mut rx: mpsc::Receiver<String>,
-    recorder: Option<Arc<Recorder>>,
-) {
-    while let Some(msg) = rx.recv().await {
-        if let Some(recorder) = &recorder {
-            recorder.record_control("client", &msg).await;
-        }
-        if writer.write_all(msg.as_bytes()).await.is_err() {
-            break;
-        }
-        if writer.write_all(b"\r\n").await.is_err() {
-            break;
-        }
-        let _ = writer.flush().await;
-    }
-    info!("Upstream control writer stopped");
-}
-
 /// Read responses and events from the upstream telescope.
 async fn upstream_reader_task(
-    reader: tokio::net::tcp::OwnedReadHalf,
+    mut reader: tokio::net::tcp::OwnedReadHalf,
     state: Arc<Mutex<ControlState>>,
     event_tx: broadcast::Sender<String>,
     recorder: Option<Arc<Recorder>>,
+    handshake_done: Arc<AtomicBool>,
 ) {
-    let mut reader = BufReader::new(reader);
-    let mut line = String::new();
+    info!("Upstream reader started, waiting for telescope messages...");
+
+    let mut buf = Vec::with_capacity(64 * 1024);
+    let mut tmp = [0u8; 32 * 1024];
+    let mut total_bytes: u64 = 0;
+    let mut total_messages: u64 = 0;
 
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => break, // Telescope disconnected
-            Ok(_) => {}
-            Err(e) => {
-                error!("Upstream read error: {}", e);
+        let n = match reader.read(&mut tmp).await {
+            Ok(0) => {
+                error!("Upstream telescope disconnected (EOF) after {} bytes, {} messages", total_bytes, total_messages);
                 break;
             }
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        if let Some(recorder) = &recorder {
-            recorder.record_control("telescope", trimmed).await;
-        }
-
-        let msg: Value = match serde_json::from_str(trimmed) {
-            Ok(v) => v,
-            Err(_) => continue,
+            Ok(n) => n,
+            Err(e) => {
+                error!("Upstream read error after {} bytes: {}", total_bytes, e);
+                break;
+            }
         };
 
-        if protocol::is_event(&msg) {
-            // Broadcast event to all clients.
-            let _ = event_tx.send(trimmed.to_string());
-        } else if let Some(remapped_id) = protocol::json_rpc_id(&msg) {
-            // Route response to the correct client.
-            let mut st = state.lock().await;
-            if let Some(pending) = st.pending.remove(&remapped_id) {
-                // Restore the original client ID.
-                let mut response = msg;
-                protocol::set_json_rpc_id(&mut response, pending.original_id);
-                let response_str = serde_json::to_string(&response).unwrap_or_default();
-                let _ = pending.client_tx.send(response_str).await;
+        total_bytes += n as u64;
+        buf.extend_from_slice(&tmp[..n]);
+        let newline_count = tmp[..n].iter().filter(|&&b| b == b'\n').count();
+        if newline_count > 0 || buf.len() > 1000 {
+            info!(
+                "Upstream: +{} bytes ({} newlines), buf={}, total={}",
+                n, newline_count, buf.len(), total_bytes
+            );
+        }
+
+        // Process all complete lines.
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line_bytes = buf[..pos].to_vec();
+            buf.drain(..=pos);
+
+            let trimmed = String::from_utf8_lossy(&line_bytes).trim().to_string();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            total_messages += 1;
+
+            let method_hint = if trimmed.len() > 20 {
+                // Quick peek at method for logging without full parse
+                if let Some(start) = trimmed.find("\"method\"") {
+                    &trimmed[start..trimmed.len().min(start + 50)]
+                } else if let Some(start) = trimmed.find("\"Event\"") {
+                    &trimmed[start..trimmed.len().min(start + 40)]
+                } else {
+                    &trimmed[..trimmed.len().min(60)]
+                }
             } else {
-                debug!("Response for unknown id {}, broadcasting", remapped_id);
-                let _ = event_tx.send(trimmed.to_string());
+                &trimmed
+            };
+            info!("<- telescope #{}: {}", total_messages, method_hint);
+
+            if let Some(recorder) = &recorder {
+                recorder.record_control("telescope", &trimmed).await;
+            }
+
+            // Signal that handshake is done after first response.
+            if !handshake_done.load(Ordering::Relaxed) {
+                handshake_done.store(true, Ordering::Relaxed);
+                info!("First telescope response received — handshake complete");
+            }
+
+            let msg: Value = match serde_json::from_str(&trimmed) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "Invalid JSON from telescope: {} ({})",
+                        e,
+                        &trimmed[..trimmed.len().min(100)]
+                    );
+                    continue;
+                }
+            };
+
+            if protocol::is_event(&msg) {
+                debug!(
+                    "Event: {}",
+                    msg.get("Event").and_then(|v| v.as_str()).unwrap_or("?")
+                );
+                let _ = event_tx.send(trimmed);
+            } else if let Some(remapped_id) = protocol::json_rpc_id(&msg) {
+                let pending = {
+                    let mut st = state.lock().await;
+                    st.pending.remove(&remapped_id)
+                };
+
+                if let Some(pending) = pending {
+                    let mut response = msg;
+                    protocol::set_json_rpc_id(&mut response, pending.original_id);
+                    let response_str = serde_json::to_string(&response).unwrap_or_default();
+
+                    info!(
+                        "Response routed: method={} id {} -> {}",
+                        protocol::method_name(&response).unwrap_or("?"),
+                        remapped_id,
+                        pending.original_id
+                    );
+
+                    if pending.client_tx.try_send(response_str).is_err() {
+                        warn!("Client channel full/closed for id {}", pending.original_id);
+                    }
+                } else {
+                    debug!("Response for untracked id {} (heartbeat), discarding", remapped_id);
+                }
+            } else {
+                debug!("Unknown message type, broadcasting");
+                let _ = event_tx.send(trimmed);
             }
         }
+
+        if buf.len() > 1_000_000 {
+            warn!("Buffer overflow ({} bytes), clearing", buf.len());
+            buf.clear();
+        }
     }
-    info!("Upstream control reader stopped");
+
+    error!("Upstream control reader stopped — telescope connection lost");
 }

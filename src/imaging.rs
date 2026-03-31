@@ -3,6 +3,9 @@
 //!
 //! The upstream sends an 80-byte header followed by `size` bytes of payload.
 //! Each complete frame is broadcast to every connected client.
+//!
+//! The imaging port also uses JSON-RPC `test_connection` heartbeats (sent
+//! as text, not binary) to keep the connection alive.
 
 use crate::protocol::{FrameHeader, HEADER_SIZE};
 use crate::recorder::Recorder;
@@ -21,22 +24,32 @@ pub async fn run(
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Imaging proxy listening on {}", bind_addr);
 
-    // Broadcast channel for frames: (header, payload) as raw bytes.
-    // Use a reasonably large capacity since frames can be several MB.
     let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(32);
+    let upstream_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Connect to upstream telescope imaging port.
-    let upstream = TcpStream::connect(upstream_addr).await?;
-    info!("Connected to telescope imaging at {}", upstream_addr);
-
-    // Spawn upstream reader task.
-    let frame_tx_r = frame_tx.clone();
-    tokio::spawn(upstream_reader_task(upstream, frame_tx_r, recorder));
-
-    // Accept client connections.
+    // Accept client connections. Upstream connects lazily on first client.
     loop {
         let (client_stream, client_addr) = listener.accept().await?;
+        let _ = client_stream.set_nodelay(true);
         info!("Imaging client connected: {}", client_addr);
+
+        // Connect upstream on first imaging client.
+        if !upstream_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            info!("First imaging client — connecting to telescope at {}...", upstream_addr);
+            match TcpStream::connect(upstream_addr).await {
+                Ok(upstream) => {
+                    let _ = upstream.set_nodelay(true);
+                    info!("Connected to telescope imaging at {}", upstream_addr);
+                    let (upstream_reader, upstream_writer) = upstream.into_split();
+                    let frame_tx_r = frame_tx.clone();
+                    tokio::spawn(upstream_reader_task(upstream_reader, frame_tx_r, recorder.clone()));
+                    tokio::spawn(imaging_heartbeat_task(upstream_writer));
+                }
+                Err(e) => {
+                    error!("Failed to connect to telescope imaging: {}", e);
+                }
+            }
+        }
 
         let frame_rx = frame_tx.subscribe();
         tokio::spawn(async move {
@@ -48,9 +61,34 @@ pub async fn run(
     }
 }
 
+/// Send periodic heartbeats on the imaging connection.
+async fn imaging_heartbeat_task(mut writer: tokio::net::tcp::OwnedWriteHalf) {
+    let mut id: u64 = 1;
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let msg = format!(
+            r#"{{"id":{},"method":"test_connection"}}"#,
+            id
+        );
+        id += 1;
+        debug!("Imaging heartbeat: {}", msg);
+        // The imaging port accepts JSON-RPC text for control commands.
+        let line = format!("{}\r\n", msg);
+        if writer.write_all(line.as_bytes()).await.is_err() {
+            error!("Imaging heartbeat write failed");
+            break;
+        }
+        if writer.flush().await.is_err() {
+            error!("Imaging heartbeat flush failed");
+            break;
+        }
+    }
+    info!("Imaging heartbeat task stopped");
+}
+
 /// Read frames from the upstream telescope and broadcast them.
 async fn upstream_reader_task(
-    mut upstream: TcpStream,
+    mut reader: tokio::net::tcp::OwnedReadHalf,
     frame_tx: broadcast::Sender<Arc<Vec<u8>>>,
     recorder: Option<Arc<Recorder>>,
 ) {
@@ -58,8 +96,8 @@ async fn upstream_reader_task(
 
     loop {
         // Read 80-byte header.
-        if upstream.read_exact(&mut header_buf).await.is_err() {
-            error!("Upstream imaging connection lost");
+        if let Err(e) = reader.read_exact(&mut header_buf).await {
+            error!("Upstream imaging connection lost: {}", e);
             break;
         }
 
@@ -73,8 +111,8 @@ async fn upstream_reader_task(
 
         // Read payload.
         let mut payload = vec![0u8; header.size as usize];
-        if upstream.read_exact(&mut payload).await.is_err() {
-            error!("Upstream imaging connection lost during payload read");
+        if let Err(e) = reader.read_exact(&mut payload).await {
+            error!("Upstream imaging read error during payload: {}", e);
             break;
         }
 
@@ -83,7 +121,7 @@ async fn upstream_reader_task(
             recorder.record_frame(&header_buf, &payload).await;
         }
 
-        // Build complete frame (header + payload) for broadcasting.
+        // Build complete frame for broadcasting.
         let mut frame = Vec::with_capacity(HEADER_SIZE + payload.len());
         frame.extend_from_slice(&header_buf);
         frame.extend_from_slice(&payload);
@@ -96,8 +134,6 @@ async fn upstream_reader_task(
             );
         }
 
-        // Broadcast to all connected clients. Ignore send errors
-        // (no clients connected is fine).
         let _ = frame_tx.send(frame);
     }
 

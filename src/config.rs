@@ -45,6 +45,11 @@ pub struct Config {
     #[arg(long, short)]
     pub record: Option<std::path::PathBuf>,
 
+    /// Raw pipe mode — forward bytes transparently without JSON parsing or
+    /// ID remapping. Useful for diagnostics (single client only).
+    #[arg(long)]
+    pub raw: bool,
+
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]
     pub verbose: u8,
