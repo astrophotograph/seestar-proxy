@@ -13,9 +13,9 @@ use std::net::IpAddr;
                   bridges UDP discovery broadcasts."
 )]
 pub struct Config {
-    /// Seestar telescope IP address
+    /// Seestar telescope IP address or hostname (default: resolves seestar.local)
     #[arg(long, short = 'u')]
-    pub upstream: IpAddr,
+    pub upstream: Option<String>,
 
     /// Seestar control port
     #[arg(long, default_value = "4700")]
@@ -49,6 +49,10 @@ pub struct Config {
     /// ID remapping. Useful for diagnostics (single client only).
     #[arg(long)]
     pub raw: bool,
+
+    /// HTTP dashboard port (0 = disable)
+    #[arg(long, default_value = "4090")]
+    pub dashboard_port: u16,
 
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]
