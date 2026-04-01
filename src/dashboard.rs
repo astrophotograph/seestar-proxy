@@ -238,8 +238,12 @@ function update(s) {
 function drawChart() {
   const W=600, H=80, P=3;
   const mx = Math.max(1, ...ch, ...ih);
-  // Baseline is pinned to H (bottom edge); only top gets padding P so peaks aren't clipped.
-  function pts(h) { return h.map((v,i) => [(P + i/(N-1)*(W-P*2)).toFixed(1),(H-(v/mx)*(H-P)).toFixed(1)]); }
+  const mn = Math.min(...ch, ...ih);
+  // Autoscale: floor is the min minus 10% of the range, capped at 0.
+  // This keeps data filling the chart when traffic is steady (no zero values).
+  const lo = Math.max(0, mn - (mx - mn) * 0.1);
+  const range = (mx - lo) || 1;
+  function pts(h) { return h.map((v,i) => [(P + i/(N-1)*(W-P*2)).toFixed(1),(H-P-((v-lo)/range)*(H-P*2)).toFixed(1)]); }
   function line(h) { const p=pts(h); return 'M'+p.map(([x,y])=>x+','+y).join('L'); }
   function area(h) { const p=pts(h),l=p[p.length-1]; return line(h)+`L${l[0]},${H}L${P},${H}Z`; }
   document.getElementById('cl').setAttribute('d', line(ch));
