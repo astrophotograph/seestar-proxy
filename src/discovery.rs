@@ -12,7 +12,7 @@ use crate::protocol::DISCOVERY_PORT;
 use serde_json::Value;
 use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 /// Run the discovery bridge.
 ///
@@ -71,37 +71,21 @@ pub async fn run(
             continue;
         }
 
-        debug!("Discovery request from {}", src_addr);
+        info!("Discovery request from {}", src_addr);
 
-        // Build response with our cached info, substituting the proxy address.
-        let mut response = device_info.clone();
-
-        // The response should make clients connect to us, not the real Seestar.
-        // Substitute the address in the result if present.
-        if let Some(result) = response.get_mut("result") {
-            if let Some(obj) = result.as_object_mut() {
-                // Some clients use the source IP of the response, but we also
-                // update any address field in the payload to be safe.
-                let proxy_ip = if bind_addr.is_unspecified() {
-                    // If bound to 0.0.0.0, use the source IP the client sees
-                    // (we can't easily determine this, so leave the field alone
-                    // and rely on the UDP source address).
-                    None
-                } else {
-                    Some(bind_addr.to_string())
-                };
-
-                if let Some(ip) = proxy_ip {
-                    obj.insert("ip".to_string(), Value::String(ip));
-                }
-            }
-        }
-
-        let response_bytes = serde_json::to_vec(&response)?;
+        // Respond with cached Seestar info.
+        // The app uses the SOURCE IP of the UDP response to determine where
+        // to connect, so we don't need to modify the payload — the response
+        // comes from the proxy's IP automatically.
+        let response_bytes = serde_json::to_vec(&device_info)?;
         if let Err(e) = socket.send_to(&response_bytes, src_addr).await {
             warn!("Failed to send discovery response to {}: {}", src_addr, e);
         } else {
-            debug!("Sent discovery response to {}", src_addr);
+            info!(
+                "Sent discovery response to {} ({} bytes) — app should connect to proxy",
+                src_addr,
+                response_bytes.len()
+            );
         }
     }
 }
@@ -111,18 +95,28 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
 
+    // Detect local IP for the probe.
+    let local_ip = {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        s.connect(SocketAddr::new(upstream_addr, 1))?;
+        s.local_addr()?.ip().to_string()
+    };
+
     let probe = serde_json::json!({
         "id": 201,
         "method": "scan_iscope",
         "name": "seestar-proxy",
-        "ip": "0.0.0.0"
+        "ip": local_ip
     });
 
+    // Try unicast first, then broadcast if that fails.
     let target = SocketAddr::new(upstream_addr, DISCOVERY_PORT);
     let probe_bytes = serde_json::to_vec(&probe)?;
-
-    // Send probe and wait for response (with timeout).
     socket.send_to(&probe_bytes, target).await?;
+
+    // Also send broadcast in case the Seestar only responds to broadcast.
+    let broadcast_target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::BROADCAST), DISCOVERY_PORT);
+    let _ = socket.send_to(&probe_bytes, broadcast_target).await;
 
     let mut buf = [0u8; 16_384];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
