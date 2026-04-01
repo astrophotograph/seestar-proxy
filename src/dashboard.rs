@@ -118,6 +118,14 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .json-detail{display:none;margin:0 0 4px 148px;padding:6px 10px;background:rgba(0,0,0,.35);border-left:2px solid var(--border);border-radius:0 3px 3px 0;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--dim);white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto}
 .entry.open .json-detail{display:block}
 .empty{color:var(--muted);font-family:var(--mono);font-size:11px;padding:24px 0;text-align:center}
+.log-controls{display:flex;align-items:center;gap:6px}
+.btn{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.06em;padding:3px 10px;border-radius:3px;border:1px solid;cursor:pointer;background:transparent;transition:background .15s}
+.btn-rec{color:var(--red);border-color:rgba(255,64,96,.4)}.btn-rec:hover{background:rgba(255,64,96,.12)}
+.btn-rec.recording{background:rgba(255,64,96,.15);border-color:var(--red)}
+.btn-exp{color:var(--green);border-color:rgba(0,255,157,.3)}.btn-exp:hover{background:rgba(0,255,157,.08)}
+.btn-exp:disabled{opacity:.35;cursor:default;pointer-events:none}
+.rec-dot{width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;margin-right:4px;animation:pulse 1s ease-in-out infinite}
+.rec-info{font-family:var(--mono);font-size:10px;color:var(--red)}
 
 /* Banner */
 .banner{display:none;align-items:center;justify-content:center;gap:8px;background:rgba(255,64,96,.08);border:1px solid rgba(255,64,96,.3);border-radius:var(--r);padding:7px 14px;margin-bottom:12px;font-size:12px;color:var(--red);font-family:var(--mono)}
@@ -202,7 +210,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <div class="panel">
   <div class="log-hdr">
     <div class="ptitle" style="margin:0"><span class="pdot"></span>Live Traffic</div>
-    <span id="log-count" style="font-size:10px;color:var(--muted)"></span>
+    <div class="log-controls">
+      <span id="rec-info" class="rec-info" style="display:none"></span>
+      <span id="log-count" style="font-size:10px;color:var(--muted)"></span>
+      <button id="btn-rec" class="btn btn-rec">&#9679; Record</button>
+      <button id="btn-exp" class="btn btn-exp" disabled>&#8595; Export</button>
+    </div>
   </div>
   <div class="col-hdr">
     <span id="sort-ts" class="sorted desc" data-col="ts">Time</span>
@@ -221,6 +234,11 @@ const LOG_WINDOW_MS = 5 * 60 * 1000; // 5 minutes — adjust as needed
 let logStore = [];           // all entries within window, oldest-first
 let sortCol = 'ts';          // current sort column: 'ts' | 'ch' | 'sm'
 let sortDesc = true;         // descending = newest first
+
+// Recording state.
+let recording = false;
+let recordStore = [];        // captured entries for export, oldest-first
+let recordStart = null;
 
 function fmt(ms) {
   const s = ms/1000|0, h = s/3600|0, m = (s%3600)/60|0, sec = s%60;
@@ -338,14 +356,65 @@ function appendLog(entries) {
     if (e.seq <= lastSeq) continue;
     lastSeq = e.seq;
     logStore.push(e);
+    if (recording) recordStore.push(e);
     changed = true;
   }
   // Evict entries outside the window.
   if (changed) {
     logStore = logStore.filter(e => e.timestamp_ms >= cutoff);
     renderLog();
+    if (recording) updateRecInfo();
   }
 }
+
+function updateRecInfo() {
+  const el = document.getElementById('rec-info');
+  const secs = Math.round((Date.now() - recordStart) / 1000);
+  el.innerHTML = '<span class="rec-dot"></span>' + recordStore.length + ' (' + secs + 's)';
+}
+
+document.getElementById('btn-rec').addEventListener('click', () => {
+  const btn = document.getElementById('btn-rec');
+  const btnExp = document.getElementById('btn-exp');
+  const recInfo = document.getElementById('rec-info');
+  if (!recording) {
+    recording = true;
+    recordStore = [];
+    recordStart = Date.now();
+    btn.textContent = '&#9632; Stop';
+    btn.classList.add('recording');
+    recInfo.style.display = '';
+    updateRecInfo();
+    btnExp.disabled = true;
+  } else {
+    recording = false;
+    btn.innerHTML = '&#9679; Record';
+    btn.classList.remove('recording');
+    recInfo.style.display = 'none';
+    btnExp.disabled = recordStore.length === 0;
+  }
+});
+
+document.getElementById('btn-exp').addEventListener('click', () => {
+  if (recordStore.length === 0) return;
+  const ts = new Date(recordStart).toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const rows = [['time','channel','summary','payload']];
+  for (const e of recordStore) {
+    rows.push([
+      new Date(e.timestamp_ms).toISOString(),
+      e.channel,
+      e.summary,
+      e.payload ? e.payload.replace(/\r?\n/g,' ') : ''
+    ]);
+  }
+  const csv = rows.map(r => r.map(f => '"' + String(f).replace(/"/g,'""') + '"').join(',')).join('\r\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'seestar-traffic-' + ts + '.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
 
 // Column-sort click handlers.
 ['sort-ts','sort-ch','sort-sm'].forEach(id => {
