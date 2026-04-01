@@ -169,10 +169,13 @@ async fn resolve_host(host: &str) -> anyhow::Result<std::net::IpAddr> {
         .await
         .map_err(|e| anyhow::anyhow!("Could not resolve '{}': {}", host, e))?
         .collect();
-    addrs
-        .into_iter()
-        .map(|a| a.ip())
-        .next()
+    let ips: Vec<_> = addrs.into_iter().map(|a| a.ip()).collect();
+    // Prefer IPv4 — mDNS names like seestar.local often resolve to both
+    // an IPv4 and an IPv6 address, and the telescope only listens on IPv4.
+    ips.iter()
+        .find(|ip| ip.is_ipv4())
+        .or_else(|| ips.first())
+        .copied()
         .ok_or_else(|| anyhow::anyhow!("No addresses found for '{}'", host))
 }
 
