@@ -49,15 +49,21 @@ fn parse_query_name(data: &[u8]) -> Option<(String, usize)> {
     Some((name.to_lowercase(), end))
 }
 
-/// Check if a DNS query name matches Seestar-related patterns.
+/// Check if a DNS query name matches a LOCAL Seestar telescope.
+/// Excludes cloud API domains like api.seestar.com.
 pub fn is_seestar_name(name: &str) -> bool {
     let n = name.to_lowercase();
-    n.contains("seestar")
+    // Exclude ZWO cloud/API domains — those should resolve normally.
+    if n.ends_with(".seestar.com") || n == "seestar.com" {
+        return false;
+    }
+    // Match local telescope names.
+    n == "seestar.local"
         || n.starts_with("s30_")
         || n.starts_with("s50_")
         || n.starts_with("s30-")
         || n.starts_with("s50-")
-        || n == "seestar.local"
+        || (n.contains("seestar") && n.ends_with(".local"))
 }
 
 /// Build a DNS A-record response for a query.
@@ -150,6 +156,9 @@ pub fn handle_dns_query(
     // Parse the query name.
     let (name, _) = parse_query_name(dns_payload)?;
 
+    // Log ALL DNS queries so we can see what the app is looking for.
+    debug!("DNS query: '{}'", name);
+
     if !is_seestar_name(&name) {
         return None; // Not a Seestar query — let it pass through.
     }
@@ -216,7 +225,11 @@ mod tests {
         assert!(is_seestar_name("seestar.local"));
         assert!(is_seestar_name("S30_cfcf05c4.local"));
         assert!(is_seestar_name("s50_abcdef.local"));
-        assert!(is_seestar_name("my-seestar.example.com"));
+        assert!(is_seestar_name("my-seestar.local"));
+        // Cloud/API domains should NOT match.
+        assert!(!is_seestar_name("api.seestar.com"));
+        assert!(!is_seestar_name("seestar.com"));
+        assert!(!is_seestar_name("www.seestar.com"));
         assert!(!is_seestar_name("google.com"));
         assert!(!is_seestar_name("apple.com"));
     }
