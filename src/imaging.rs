@@ -85,7 +85,7 @@ async fn imaging_heartbeat_task(mut writer: tokio::net::tcp::OwnedWriteHalf) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let msg = format!(
-            r#"{{"id":{},"method":"test_connection"}}"#,
+            r#"{{"id":{},"method":"test_connection","params":"verify"}}"#,
             id
         );
         id += 1;

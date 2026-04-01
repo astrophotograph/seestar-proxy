@@ -148,7 +148,7 @@ pub async fn run(
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     let id = next_id.fetch_add(1, Ordering::Relaxed);
-                    let msg = format!(r#"{{"id":{},"method":"test_connection"}}"#, id);
+                    let msg = format!(r#"{{"id":{},"method":"test_connection","params":"verify"}}"#, id);
                     debug!("Heartbeat: id={}", id);
                     if upstream_tx_hb.send(msg).await.is_err() {
                         break;
