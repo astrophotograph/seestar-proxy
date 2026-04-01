@@ -319,13 +319,7 @@ async fn packet_loop(
                             let cont = tunn.decapsulate(None, &[], &mut dst);
                             match process_tunn_result(&udp, src, cont, &net.inject_tx).await {
                                 TunnAction::Decrypted(pkt) => {
-                                    // Check for discovery and respond.
-                                    if let Some(response) = tunnel_discovery::handle_discovery(&pkt, upstream_ip_bytes, &device_info_json) {
-                                        let mut enc = vec![0u8; 65536];
-                                        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&response, &mut enc) {
-                                            let _ = udp.send_to(data, src).await;
-                                        }
-                                    }
+                                    handle_decrypted_packet(&pkt, upstream_ip_bytes, &device_info_json, &mut tunn, &udp, src).await;
                                     break;
                                 }
                                 TunnAction::Done => break,
@@ -333,13 +327,7 @@ async fn packet_loop(
                             }
                         }
                         TunnAction::Decrypted(pkt) => {
-                            // Check for discovery and respond.
-                            if let Some(response) = tunnel_discovery::handle_discovery(&pkt, upstream_ip_bytes, &device_info_json) {
-                                let mut enc = vec![0u8; 65536];
-                                if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&response, &mut enc) {
-                                    let _ = udp.send_to(data, src).await;
-                                }
-                            }
+                            handle_decrypted_packet(&pkt, upstream_ip_bytes, &device_info_json, &mut tunn, &udp, src).await;
                             break;
                         }
                         TunnAction::Done => break,
@@ -453,6 +441,34 @@ enum TunnAction {
     Done,
     Continue,
     /// A decrypted IPv4 packet was received and injected into the TCP stack.
-    /// The packet bytes are returned so the caller can also check for UDP discovery.
+    /// The packet bytes are returned so the caller can also check for UDP discovery and ICMP.
     Decrypted(Vec<u8>),
+}
+
+/// Handle a decrypted IP packet: check for discovery broadcasts and ICMP pings.
+/// If matched, encrypt and send the response back through the tunnel.
+async fn handle_decrypted_packet(
+    pkt: &[u8],
+    upstream_ip: [u8; 4],
+    device_info_json: &str,
+    tunn: &mut Tunn,
+    udp: &UdpSocket,
+    peer: SocketAddr,
+) {
+    // Check for UDP discovery broadcast.
+    if let Some(response) = tunnel_discovery::handle_discovery(pkt, upstream_ip, device_info_json) {
+        let mut enc = vec![0u8; 65536];
+        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&response, &mut enc) {
+            let _ = udp.send_to(data, peer).await;
+        }
+        return;
+    }
+
+    // Check for ICMP echo request (ping).
+    if let Some(reply) = tunnel_discovery::handle_icmp_echo(pkt, upstream_ip) {
+        let mut enc = vec![0u8; 65536];
+        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&reply, &mut enc) {
+            let _ = udp.send_to(data, peer).await;
+        }
+    }
 }

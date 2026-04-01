@@ -153,6 +153,88 @@ pub fn handle_discovery(
     Some(response_packet)
 }
 
+/// Handle an ICMP echo request (ping) and return an echo reply.
+///
+/// Returns `Some(response_ip_packet)` if the packet is an ICMP echo request
+/// destined for the upstream Seestar IP.
+pub fn handle_icmp_echo(ip_packet: &[u8], upstream_ip: [u8; 4]) -> Option<Vec<u8>> {
+    if ip_packet.len() < 28 {
+        return None;
+    }
+
+    let proto = ip_packet[9];
+    if proto != 1 {
+        return None; // Not ICMP
+    }
+
+    let dst_ip = [ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]];
+    // Only respond to pings for the Seestar IP.
+    if dst_ip != upstream_ip {
+        return None;
+    }
+
+    let ihl = (ip_packet[0] & 0x0f) as usize * 4;
+    if ip_packet.len() < ihl + 8 {
+        return None;
+    }
+
+    let icmp = &ip_packet[ihl..];
+    let icmp_type = icmp[0];
+    // Type 8 = Echo Request
+    if icmp_type != 8 {
+        return None;
+    }
+
+    let src_ip = [ip_packet[12], ip_packet[13], ip_packet[14], ip_packet[15]];
+
+    debug!(
+        "WireGuard tunnel: ICMP echo request from {}.{}.{}.{} -> {}.{}.{}.{}",
+        src_ip[0], src_ip[1], src_ip[2], src_ip[3],
+        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
+    );
+
+    // Build the echo reply: swap src/dst IPs, change type 8→0, fix checksums.
+    let mut reply = ip_packet.to_vec();
+
+    // Swap IP addresses.
+    reply[12..16].copy_from_slice(&dst_ip);
+    reply[16..20].copy_from_slice(&src_ip);
+
+    // Zero IP header checksum, recalculate.
+    reply[10] = 0;
+    reply[11] = 0;
+    let ip_cksum = ip_checksum(&reply[..ihl]);
+    reply[10..12].copy_from_slice(&ip_cksum.to_be_bytes());
+
+    // Change ICMP type from 8 (request) to 0 (reply).
+    reply[ihl] = 0;
+
+    // Zero ICMP checksum, recalculate over entire ICMP message.
+    reply[ihl + 2] = 0;
+    reply[ihl + 3] = 0;
+    let icmp_cksum = internet_checksum(&reply[ihl..]);
+    reply[ihl + 2..ihl + 4].copy_from_slice(&icmp_cksum.to_be_bytes());
+
+    Some(reply)
+}
+
+/// Internet checksum (RFC 1071) — used for both IP header and ICMP.
+fn internet_checksum(data: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +328,65 @@ mod tests {
         let payload = &response[28..];
         let parsed: serde_json::Value = serde_json::from_slice(payload).unwrap();
         assert_eq!(parsed["result"]["sn"], "abc");
+    }
+
+    // ── ICMP echo tests ──────────────────────────────────────────────────
+
+    fn build_icmp_echo_request(src: [u8; 4], dst: [u8; 4]) -> Vec<u8> {
+        let total_len: u16 = 20 + 8; // IP header + ICMP header (no payload)
+        let mut pkt = vec![0u8; total_len as usize];
+        pkt[0] = 0x45; // IPv4, IHL=5
+        pkt[2..4].copy_from_slice(&total_len.to_be_bytes());
+        pkt[8] = 64; // TTL
+        pkt[9] = 1;  // ICMP
+        pkt[12..16].copy_from_slice(&src);
+        pkt[16..20].copy_from_slice(&dst);
+        // IP checksum
+        let cksum = super::ip_checksum(&pkt[..20]);
+        pkt[10..12].copy_from_slice(&cksum.to_be_bytes());
+        // ICMP: type=8 (echo request), code=0, id=1, seq=1
+        pkt[20] = 8;
+        pkt[21] = 0;
+        pkt[24..26].copy_from_slice(&1u16.to_be_bytes()); // id
+        pkt[26..28].copy_from_slice(&1u16.to_be_bytes()); // seq
+        // ICMP checksum
+        let icmp_cksum = super::internet_checksum(&pkt[20..]);
+        pkt[22..24].copy_from_slice(&icmp_cksum.to_be_bytes());
+        pkt
+    }
+
+    #[test]
+    fn icmp_echo_reply_basic() {
+        let request = build_icmp_echo_request([10, 99, 0, 2], [192, 168, 42, 41]);
+        let reply = handle_icmp_echo(&request, [192, 168, 42, 41]).unwrap();
+
+        assert_eq!(reply.len(), request.len());
+        assert_eq!(reply[9], 1); // ICMP
+        // Src/dst swapped
+        assert_eq!(&reply[12..16], &[192, 168, 42, 41]);
+        assert_eq!(&reply[16..20], &[10, 99, 0, 2]);
+        // Type 0 = echo reply
+        assert_eq!(reply[20], 0);
+    }
+
+    #[test]
+    fn icmp_echo_wrong_dst_returns_none() {
+        let request = build_icmp_echo_request([10, 99, 0, 2], [8, 8, 8, 8]);
+        assert!(handle_icmp_echo(&request, [192, 168, 42, 41]).is_none());
+    }
+
+    #[test]
+    fn icmp_non_echo_returns_none() {
+        let mut pkt = build_icmp_echo_request([10, 99, 0, 2], [192, 168, 42, 41]);
+        pkt[20] = 3; // Type 3 = destination unreachable, not echo
+        assert!(handle_icmp_echo(&pkt, [192, 168, 42, 41]).is_none());
+    }
+
+    #[test]
+    fn tcp_packet_not_handled_as_icmp() {
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45;
+        pkt[9] = 6; // TCP
+        assert!(handle_icmp_echo(&pkt, [192, 168, 42, 41]).is_none());
     }
 }
