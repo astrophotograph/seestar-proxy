@@ -283,7 +283,7 @@ function drawChart() {
 }
 
 function buildEntry(e) {
-  const entry = document.createElement('div'); entry.className = 'entry';
+  const entry = document.createElement('div'); entry.className = 'entry'; entry.dataset.seq = e.seq;
   const row = document.createElement('div'); row.className = 'row';
   const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtTime(e.timestamp_ms);
   const ch = document.createElement('span'); ch.className = 'ch ' + e.channel; ch.textContent = e.channel;
@@ -303,6 +303,8 @@ function buildEntry(e) {
 
 function renderLog() {
   const log = document.getElementById('log');
+  // Preserve expanded state across re-renders.
+  const openSeqs = new Set([...log.querySelectorAll('.entry.open')].map(el => +el.dataset.seq));
   // Sort a shallow copy; logStore stays oldest-first.
   const sorted = logStore.slice().sort((a, b) => {
     let av, bv;
@@ -317,7 +319,11 @@ function renderLog() {
   if (sorted.length === 0) {
     log.innerHTML = '<div class="empty">Waiting for traffic&hellip;</div>';
   } else {
-    for (const e of sorted) log.appendChild(buildEntry(e));
+    for (const e of sorted) {
+      const el = buildEntry(e);
+      if (openSeqs.has(e.seq)) el.classList.add('open');
+      log.appendChild(el);
+    }
   }
   document.getElementById('log-count').textContent =
     sorted.length + ' entr' + (sorted.length === 1 ? 'y' : 'ies') +
