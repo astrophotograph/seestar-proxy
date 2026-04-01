@@ -295,7 +295,7 @@ async fn packet_loop(
 ) {
     let mut recv_buf = vec![0u8; 65536];
     let mut peer_addr: Option<SocketAddr> = None;
-    let mut session_announced = false;
+    let mut session_active = false;
 
     // Client tunnel IP — we'll send proactive discovery to this address.
     let client_ip: [u8; 4] = [10, 99, 0, 2];
@@ -303,6 +303,8 @@ async fn packet_loop(
     info!("WireGuard packet loop started (with TCP stack)");
 
     let mut timer = tokio::time::interval(std::time::Duration::from_millis(250));
+    // Periodic discovery announcements — send every 3 seconds while session is active.
+    let mut discovery_timer = tokio::time::interval(std::time::Duration::from_secs(3));
 
     loop {
         tokio::select! {
@@ -318,41 +320,21 @@ async fn packet_loop(
 
                 peer_addr = Some(src);
 
-                // On first traffic after session, push a discovery announcement
-                // to the client. iOS doesn't route UDP broadcasts through VPN,
-                // so we proactively tell the app the telescope is here.
-                if !session_announced {
-                    // Try decapsulating first to establish the session.
+                // Mark session as active when we get data packets.
+                if !session_active {
                     let mut probe_dst = vec![0u8; 65536];
                     let probe_result = tunn.decapsulate(None, &recv_buf[..len], &mut probe_dst);
                     if matches!(&probe_result, TunnResult::WriteToTunnelV4(_, _)) {
-                        session_announced = true;
-                        info!("WireGuard session active — sending proactive discovery to tunnel client");
-
-                        // Build a discovery response as if the client had asked.
-                        let discovery_packet = tunnel_discovery::build_discovery_response(
-                            upstream_ip_bytes,
-                            client_ip,
-                            crate::protocol::DISCOVERY_PORT,
-                            device_info_json.as_bytes(),
-                        );
-
-                        // Encrypt and send it.
-                        let mut enc = vec![0u8; 65536];
-                        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&discovery_packet, &mut enc) {
-                            if let Err(e) = udp.send_to(data, src).await {
-                                warn!("Proactive discovery send error: {}", e);
-                            } else {
-                                info!("Sent proactive discovery response through tunnel");
-                            }
-                        }
-
-                        // Also process the original decrypted packet.
-                        let _ = process_tunn_result(&udp, src, probe_result, &net.inject_tx).await;
-                        continue;
+                        session_active = true;
+                        info!("WireGuard session active — starting periodic discovery announcements");
                     }
-                    // If not a data packet yet (still handshake), process normally.
-                    let _ = process_tunn_result(&udp, src, probe_result, &net.inject_tx).await;
+                    // Process the packet (handles both handshake and data).
+                    match process_tunn_result(&udp, src, probe_result, &net.inject_tx).await {
+                        TunnAction::Decrypted(pkt) => {
+                            handle_decrypted_packet(&pkt, upstream_ip_bytes, &device_info_json, &mut tunn, &udp, src).await;
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -400,6 +382,25 @@ async fn packet_loop(
                     let mut dst = vec![0u8; 65536];
                     let tunn_result = tunn.update_timers(&mut dst);
                     let _ = process_tunn_result(&udp, addr, tunn_result, &net.inject_tx).await;
+                }
+            }
+
+            // Periodic discovery announcements while session is active.
+            _ = discovery_timer.tick() => {
+                if session_active {
+                    if let Some(addr) = peer_addr {
+                        let discovery_packet = tunnel_discovery::build_discovery_response(
+                            upstream_ip_bytes,
+                            client_ip,
+                            crate::protocol::DISCOVERY_PORT,
+                            device_info_json.as_bytes(),
+                        );
+                        let mut enc = vec![0u8; 65536];
+                        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&discovery_packet, &mut enc) {
+                            let _ = udp.send_to(data, addr).await;
+                        }
+                        debug!("Sent periodic discovery announcement through tunnel");
+                    }
                 }
             }
         }
