@@ -249,6 +249,10 @@ async fn packet_loop(
 ) {
     let mut recv_buf = vec![0u8; 65536];
     let mut peer_addr: Option<SocketAddr> = None;
+    let mut session_announced = false;
+
+    // Client tunnel IP — we'll send proactive discovery to this address.
+    let client_ip: [u8; 4] = [10, 99, 0, 2];
 
     info!("WireGuard packet loop started (with TCP stack)");
 
@@ -267,6 +271,44 @@ async fn packet_loop(
                 };
 
                 peer_addr = Some(src);
+
+                // On first traffic after session, push a discovery announcement
+                // to the client. iOS doesn't route UDP broadcasts through VPN,
+                // so we proactively tell the app the telescope is here.
+                if !session_announced {
+                    // Try decapsulating first to establish the session.
+                    let mut probe_dst = vec![0u8; 65536];
+                    let probe_result = tunn.decapsulate(None, &recv_buf[..len], &mut probe_dst);
+                    if matches!(&probe_result, TunnResult::WriteToTunnelV4(_, _)) {
+                        session_announced = true;
+                        info!("WireGuard session active — sending proactive discovery to tunnel client");
+
+                        // Build a discovery response as if the client had asked.
+                        let discovery_packet = tunnel_discovery::build_discovery_response(
+                            upstream_ip_bytes,
+                            client_ip,
+                            crate::protocol::DISCOVERY_PORT,
+                            device_info_json.as_bytes(),
+                        );
+
+                        // Encrypt and send it.
+                        let mut enc = vec![0u8; 65536];
+                        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&discovery_packet, &mut enc) {
+                            if let Err(e) = udp.send_to(data, src).await {
+                                warn!("Proactive discovery send error: {}", e);
+                            } else {
+                                info!("Sent proactive discovery response through tunnel");
+                            }
+                        }
+
+                        // Also process the original decrypted packet.
+                        let _ = process_tunn_result(&udp, src, probe_result, &net.inject_tx).await;
+                        continue;
+                    }
+                    // If not a data packet yet (still handshake), process normally.
+                    let _ = process_tunn_result(&udp, src, probe_result, &net.inject_tx).await;
+                    continue;
+                }
 
                 // Decrypt — loop to handle chained results.
                 let mut dst = vec![0u8; 65536];
@@ -361,13 +403,16 @@ async fn process_tunn_result(
                     _ => "?",
                 };
 
-                if proto == 6 && data.len() >= 24 {
-                    let dst_port = u16::from_be_bytes([data[22], data[23]]);
+                // Extract port for TCP and UDP.
+                let ihl = (data[0] & 0x0f) as usize * 4;
+                if (proto == 6 || proto == 17) && data.len() >= ihl + 4 {
+                    let dst_port = u16::from_be_bytes([data[ihl + 2], data[ihl + 3]]);
+                    let src_port = u16::from_be_bytes([data[ihl], data[ihl + 1]]);
                     debug!(
-                        "WireGuard decrypted: {} -> {}.{}.{}.{}:{} ({} bytes)",
+                        "WireGuard decrypted: {} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} ({} bytes)",
                         proto_name,
-                        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
-                        dst_port,
+                        data[12], data[13], data[14], data[15], src_port,
+                        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
                         data.len()
                     );
                 } else {
