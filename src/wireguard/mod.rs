@@ -165,8 +165,47 @@ pub async fn start(
     Ok(wg_info)
 }
 
-/// Fetch device info from the real Seestar for discovery response injection.
-async fn fetch_device_info(upstream_ip: std::net::IpAddr, control_port: u16) -> String {
+/// Fetch device info from the real Seestar by sending a scan_iscope UDP probe.
+/// This captures the exact native response format so tunnel clients get
+/// an identical discovery response to what they'd see on the local network.
+async fn fetch_device_info(upstream_ip: std::net::IpAddr, _control_port: u16) -> String {
+    let probe = serde_json::json!({
+        "id": 201,
+        "method": "scan_iscope",
+        "name": "seestar-proxy",
+        "ip": "0.0.0.0"
+    });
+
+    let target = SocketAddr::new(upstream_ip, crate::protocol::DISCOVERY_PORT);
+
+    match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        let probe_bytes = serde_json::to_vec(&probe)?;
+        socket.send_to(&probe_bytes, target).await?;
+
+        let mut buf = [0u8; 4096];
+        loop {
+            let (n, src) = socket.recv_from(&mut buf).await?;
+            if src.ip() == upstream_ip {
+                let response = String::from_utf8_lossy(&buf[..n]).to_string();
+                return Ok::<String, anyhow::Error>(response);
+            }
+        }
+    }).await {
+        Ok(Ok(response)) => {
+            info!("Cached native discovery response: {}", &response[..response.len().min(200)]);
+            response
+        }
+        _ => {
+            warn!("Discovery probe to {} timed out, building response from get_device_state", upstream_ip);
+            // Fallback: try TCP get_device_state.
+            fetch_device_info_tcp(upstream_ip, _control_port).await
+        }
+    }
+}
+
+/// Fallback: build a discovery response from get_device_state over TCP.
+async fn fetch_device_info_tcp(upstream_ip: std::net::IpAddr, control_port: u16) -> String {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpStream;
 
@@ -175,35 +214,36 @@ async fn fetch_device_info(upstream_ip: std::net::IpAddr, control_port: u16) -> 
         let stream = TcpStream::connect(addr).await?;
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-
-        // Send get_device_state to get the telescope info.
         writer.write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n").await?;
-
         let mut line = String::new();
         reader.read_line(&mut line).await?;
         Ok::<String, anyhow::Error>(line)
     }).await {
         Ok(Ok(response)) => {
-            // Wrap in a discovery-style response.
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim()) {
                 let result = parsed.get("result").cloned().unwrap_or(serde_json::json!({}));
                 let discovery_response = serde_json::json!({
-                    "id": 201,
+                    "jsonrpc": "2.0",
+                    "Timestamp": "0",
+                    "method": "scan_iscope",
                     "result": {
                         "sn": result.pointer("/device/sn").and_then(|v| v.as_str()).unwrap_or("unknown"),
                         "product_model": result.pointer("/device/product_model").and_then(|v| v.as_str()).unwrap_or("Seestar"),
+                        "ssid": result.pointer("/ap/ssid").and_then(|v| v.as_str()).unwrap_or(""),
+                        "is_verified": true,
                         "tcp_client_num": 0,
-                    }
+                    },
+                    "code": 0,
+                    "id": 201
                 });
-                info!("Cached device info for tunnel discovery: {}", discovery_response);
+                info!("Built discovery response from device state: {}", discovery_response);
                 serde_json::to_string(&discovery_response).unwrap_or_default()
             } else {
-                warn!("Could not parse device state for tunnel discovery");
                 default_device_info()
             }
         }
         _ => {
-            warn!("Could not fetch device info for tunnel discovery, using default");
+            warn!("Could not fetch device info for tunnel discovery");
             default_device_info()
         }
     }
@@ -227,12 +267,18 @@ fn detect_local_ip() -> Option<String> {
 
 fn default_device_info() -> String {
     serde_json::json!({
-        "id": 201,
+        "jsonrpc": "2.0",
+        "Timestamp": "0",
+        "method": "scan_iscope",
         "result": {
             "sn": "proxy",
             "product_model": "Seestar (via proxy)",
+            "ssid": "Seestar_proxy",
+            "is_verified": true,
             "tcp_client_num": 0,
-        }
+        },
+        "code": 0,
+        "id": 201
     }).to_string()
 }
 
