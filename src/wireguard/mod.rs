@@ -24,7 +24,7 @@ pub mod qr;
 pub mod tunnel_discovery;
 
 use boringtun::noise::{Tunn, TunnResult, errors::WireGuardError};
-use keys::{WgKeypair, generate_client_keypair, private_key_b64, public_key_b64};
+use keys::WgKeypair;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -61,10 +61,12 @@ pub async fn start(
     let server_keys = WgKeypair::load_or_generate(key_file)?;
     let server_pub_b64 = server_keys.public_key_b64();
 
-    // Generate client keys (for the QR config).
-    let (client_private, client_public) = generate_client_keypair();
-    let client_priv_b64 = private_key_b64(&client_private);
-    let client_pub_b64 = public_key_b64(&client_public);
+    // Load or generate client keys (persisted so QR code survives restarts).
+    let client_key_file = key_file.with_file_name("wg_client.key");
+    let client_keys = WgKeypair::load_or_generate(&client_key_file)?;
+    let client_priv_b64 = keys::private_key_b64(&client_keys.private);
+    let client_pub_b64 = keys::public_key_b64(&client_keys.public);
+    let client_public = client_keys.public;
 
     // Determine endpoint for client config.
     let endpoint_str = endpoint.unwrap_or_else(|| {
