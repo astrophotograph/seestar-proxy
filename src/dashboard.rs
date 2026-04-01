@@ -104,18 +104,28 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
 .log-cont{height:320px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(60,70,140,.5) transparent}
 .log-cont::-webkit-scrollbar{width:4px}.log-cont::-webkit-scrollbar-thumb{background:rgba(60,70,140,.6);border-radius:2px}
-.entry{border-bottom:1px solid rgba(42,48,100,.25);animation:fi .15s ease}
+.col-hdr{display:grid;grid-template-columns:72px 60px 1fr;gap:8px;padding:0 0 4px;border-bottom:1px solid var(--border);margin-bottom:2px}
+.col-hdr span{font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);cursor:pointer;user-select:none}
+.col-hdr span:hover{color:var(--dim)}.col-hdr span.sorted{color:var(--cyan)}
+.col-hdr span.sorted::after{content:' ▲'}.col-hdr span.sorted.desc::after{content:' ▼'}
+.entry{border-bottom:1px solid rgba(42,48,100,.25)}
 .entry.has-payload{cursor:pointer}.entry.has-payload:hover .row{background:rgba(42,48,100,.15)}
-@keyframes fi{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:none}}
-.row{display:grid;grid-template-columns:72px 52px 1fr;gap:8px;padding:3px 0;font-family:var(--mono);font-size:11px;line-height:1.5;border-radius:3px}
+.row{display:grid;grid-template-columns:72px 60px 1fr;gap:8px;padding:3px 0;font-family:var(--mono);font-size:11px;line-height:1.5;border-radius:3px}
 .ts{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .ch{font-weight:600;white-space:nowrap;text-align:right}
 .ch.ctrl-rx{color:var(--cyan)}.ch.ctrl-tx{color:var(--orange)}.ch.ctrl-evt{color:var(--purple)}.ch.img{color:var(--green)}
 .sm{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.json-detail{display:none;margin:0 0 4px 132px;padding:6px 10px;background:rgba(0,0,0,.35);border-left:2px solid var(--border);border-radius:0 3px 3px 0;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--dim);white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto}
+.json-detail{display:none;margin:0 0 4px 148px;padding:6px 10px;background:rgba(0,0,0,.35);border-left:2px solid var(--border);border-radius:0 3px 3px 0;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--dim);white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto}
 .entry.open .json-detail{display:block}
-.expand-hint{font-size:9px;color:var(--muted);margin-left:4px;opacity:.6}
 .empty{color:var(--muted);font-family:var(--mono);font-size:11px;padding:24px 0;text-align:center}
+.log-controls{display:flex;align-items:center;gap:6px}
+.btn{font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.06em;padding:3px 10px;border-radius:3px;border:1px solid;cursor:pointer;background:transparent;transition:background .15s}
+.btn-rec{color:var(--red);border-color:rgba(255,64,96,.4)}.btn-rec:hover{background:rgba(255,64,96,.12)}
+.btn-rec.recording{background:rgba(255,64,96,.15);border-color:var(--red)}
+.btn-exp{color:var(--green);border-color:rgba(0,255,157,.3)}.btn-exp:hover{background:rgba(0,255,157,.08)}
+.btn-exp:disabled{opacity:.35;cursor:default;pointer-events:none}
+.rec-dot{width:6px;height:6px;border-radius:50%;background:var(--red);display:inline-block;margin-right:4px;animation:pulse 1s ease-in-out infinite}
+.rec-info{font-family:var(--mono);font-size:10px;color:var(--red)}
 
 /* Banner */
 .banner{display:none;align-items:center;justify-content:center;gap:8px;background:rgba(255,64,96,.08);border:1px solid rgba(255,64,96,.3);border-radius:var(--r);padding:7px 14px;margin-bottom:12px;font-size:12px;color:var(--red);font-family:var(--mono)}
@@ -200,7 +210,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <div class="panel">
   <div class="log-hdr">
     <div class="ptitle" style="margin:0"><span class="pdot"></span>Live Traffic</div>
-    <span style="font-size:10px;color:var(--muted)">last 100</span>
+    <div class="log-controls">
+      <span id="rec-info" class="rec-info" style="display:none"></span>
+      <span id="log-count" style="font-size:10px;color:var(--muted)"></span>
+      <button id="btn-rec" class="btn btn-rec">&#9679; Record</button>
+      <button id="btn-exp" class="btn btn-exp" disabled>&#8595; Export</button>
+    </div>
+  </div>
+  <div class="col-hdr">
+    <span id="sort-ts" class="sorted desc" data-col="ts">Time</span>
+    <span id="sort-ch" data-col="ch">Channel</span>
+    <span id="sort-sm" data-col="sm">Summary</span>
   </div>
   <div class="log-cont" id="log"><div class="empty">Waiting for traffic&hellip;</div></div>
 </div>
@@ -208,6 +228,17 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <script>
 const N = 60;
 let ch = Array(N).fill(0), ih = Array(N).fill(0), lastSeq = -1;
+
+// Live traffic store: keeps entries within the rolling window.
+const LOG_WINDOW_MS = 5 * 60 * 1000; // 5 minutes — adjust as needed
+let logStore = [];           // all entries within window, oldest-first
+let sortCol = 'ts';          // current sort column: 'ts' | 'ch' | 'sm'
+let sortDesc = true;         // descending = newest first
+
+// Recording state.
+let recording = false;
+let recordStore = [];        // captured entries for export, oldest-first
+let recordStart = null;
 
 function fmt(ms) {
   const s = ms/1000|0, h = s/3600|0, m = (s%3600)/60|0, sec = s%60;
@@ -219,7 +250,12 @@ function fmtBytes(n) {
   if (n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
   return (n/1073741824).toFixed(2) + ' GB';
 }
-function fmtSecs(ms) { return (ms/1000).toFixed(3) + 's'; }
+function fmtTime(ts_ms) {
+  const d = new Date(ts_ms);
+  return String(d.getHours()).padStart(2,'0') + ':' +
+         String(d.getMinutes()).padStart(2,'0') + ':' +
+         String(d.getSeconds()).padStart(2,'0');
+}
 
 function update(s) {
   document.getElementById('uptime').textContent = fmt(s.uptime_ms);
@@ -264,35 +300,131 @@ function drawChart() {
   document.getElementById('oa').setAttribute('d', area(ih));
 }
 
-function appendLog(entries) {
+function buildEntry(e) {
+  const entry = document.createElement('div'); entry.className = 'entry'; entry.dataset.seq = e.seq;
+  const row = document.createElement('div'); row.className = 'row';
+  const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtTime(e.timestamp_ms);
+  const ch = document.createElement('span'); ch.className = 'ch ' + e.channel; ch.textContent = e.channel;
+  const sm = document.createElement('span'); sm.className = 'sm'; sm.textContent = e.summary;
+  row.append(ts, ch, sm);
+  entry.appendChild(row);
+  if (e.payload) {
+    entry.classList.add('has-payload');
+    const detail = document.createElement('div'); detail.className = 'json-detail';
+    try { detail.textContent = JSON.stringify(JSON.parse(e.payload), null, 2); }
+    catch { detail.textContent = e.payload; }
+    entry.appendChild(detail);
+    entry.addEventListener('click', () => entry.classList.toggle('open'));
+  }
+  return entry;
+}
+
+function renderLog() {
   const log = document.getElementById('log');
-  const empty = log.querySelector('.empty');
-  if (empty) empty.remove();
-  const atBottom = log.scrollHeight - log.clientHeight <= log.scrollTop + 30;
+  // Preserve expanded state across re-renders.
+  const openSeqs = new Set([...log.querySelectorAll('.entry.open')].map(el => +el.dataset.seq));
+  // Sort a shallow copy; logStore stays oldest-first.
+  const sorted = logStore.slice().sort((a, b) => {
+    let av, bv;
+    if (sortCol === 'ts')      { av = a.timestamp_ms; bv = b.timestamp_ms; }
+    else if (sortCol === 'ch') { av = a.channel;      bv = b.channel; }
+    else                       { av = a.summary;      bv = b.summary; }
+    if (av < bv) return sortDesc ? 1 : -1;
+    if (av > bv) return sortDesc ? -1 : 1;
+    return 0;
+  });
+  log.innerHTML = '';
+  if (sorted.length === 0) {
+    log.innerHTML = '<div class="empty">Waiting for traffic&hellip;</div>';
+  } else {
+    for (const e of sorted) {
+      const el = buildEntry(e);
+      if (openSeqs.has(e.seq)) el.classList.add('open');
+      log.appendChild(el);
+    }
+  }
+  document.getElementById('log-count').textContent =
+    sorted.length + ' entr' + (sorted.length === 1 ? 'y' : 'ies') +
+    ' / ' + Math.round(LOG_WINDOW_MS / 60000) + ' min window';
+}
+
+function appendLog(entries) {
+  const now = Date.now();
+  const cutoff = now - LOG_WINDOW_MS;
+  let changed = false;
   for (const e of entries) {
     if (e.seq <= lastSeq) continue;
     lastSeq = e.seq;
-    const entry = document.createElement('div'); entry.className = 'entry';
-    const row = document.createElement('div'); row.className = 'row';
-    const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtSecs(e.elapsed_ms);
-    const ch = document.createElement('span'); ch.className = 'ch '+e.channel; ch.textContent = e.channel;
-    const sm = document.createElement('span'); sm.className = 'sm'; sm.textContent = e.summary;
-    row.append(ts, ch, sm);
-    entry.appendChild(row);
-    if (e.payload) {
-      entry.classList.add('has-payload');
-      const detail = document.createElement('div'); detail.className = 'json-detail';
-      try { detail.textContent = JSON.stringify(JSON.parse(e.payload), null, 2); }
-      catch { detail.textContent = e.payload; }
-      entry.appendChild(detail);
-      entry.addEventListener('click', () => entry.classList.toggle('open'));
-    }
-    log.appendChild(entry);
-    const allEntries = log.querySelectorAll('.entry');
-    if (allEntries.length > 100) allEntries[0].remove();
+    logStore.push(e);
+    if (recording) recordStore.push(e);
+    changed = true;
   }
-  if (atBottom) log.scrollTop = log.scrollHeight;
+  // Evict entries outside the window.
+  if (changed) {
+    logStore = logStore.filter(e => e.timestamp_ms >= cutoff);
+    renderLog();
+    if (recording) updateRecInfo();
+  }
 }
+
+function updateRecInfo() {
+  const el = document.getElementById('rec-info');
+  const secs = Math.round((Date.now() - recordStart) / 1000);
+  el.innerHTML = '<span class="rec-dot"></span>' + recordStore.length + ' (' + secs + 's)';
+}
+
+document.getElementById('btn-rec').addEventListener('click', () => {
+  const btn = document.getElementById('btn-rec');
+  const btnExp = document.getElementById('btn-exp');
+  const recInfo = document.getElementById('rec-info');
+  if (!recording) {
+    recording = true;
+    recordStore = [];
+    recordStart = Date.now();
+    btn.textContent = '&#9632; Stop';
+    btn.classList.add('recording');
+    recInfo.style.display = '';
+    updateRecInfo();
+    btnExp.disabled = true;
+  } else {
+    recording = false;
+    btn.innerHTML = '&#9679; Record';
+    btn.classList.remove('recording');
+    recInfo.style.display = 'none';
+    btnExp.disabled = recordStore.length === 0;
+  }
+});
+
+document.getElementById('btn-exp').addEventListener('click', () => {
+  if (recordStore.length === 0) return;
+  const ts = new Date(recordStart).toISOString().replace(/[:.]/g,'-').slice(0,19);
+  const lines = recordStore.map(e => JSON.stringify({
+    time:    new Date(e.timestamp_ms).toISOString(),
+    channel: e.channel,
+    summary: e.summary,
+    payload: e.payload ? JSON.parse(e.payload) : null,
+  }));
+  const blob = new Blob([lines.join('\n') + '\n'], {type:'application/x-ndjson'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'seestar-traffic-' + ts + '.jsonl';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+// Column-sort click handlers.
+['sort-ts','sort-ch','sort-sm'].forEach(id => {
+  document.getElementById(id).addEventListener('click', () => {
+    const col = id.replace('sort-', '');
+    if (sortCol === col) { sortDesc = !sortDesc; }
+    else { sortCol = col; sortDesc = col === 'ts'; } // default: ts desc, others asc
+    document.querySelectorAll('.col-hdr span').forEach(el => {
+      el.classList.remove('sorted','desc');
+      if (el.id === id) { el.classList.add('sorted'); if (sortDesc) el.classList.add('desc'); }
+    });
+    renderLog();
+  });
+});
 
 (function connect() {
   const es = new EventSource('/api/stream');

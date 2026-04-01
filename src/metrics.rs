@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const LOG_CAPACITY: usize = 100;
 
@@ -12,6 +12,8 @@ pub const LOG_CAPACITY: usize = 100;
 pub struct LogEntry {
     pub seq: u64,
     pub elapsed_ms: u64,
+    /// Unix epoch milliseconds at the time the entry was recorded.
+    pub timestamp_ms: u64,
     /// CSS channel name: "ctrl-rx", "ctrl-tx", "ctrl-evt", "img"
     pub channel: &'static str,
     pub summary: String,
@@ -77,7 +79,11 @@ impl Metrics {
     /// Like [`push_log`] but also stores the raw JSON payload for dashboard display.
     pub fn push_log_with_payload(&self, channel: &'static str, summary: String, payload: Option<String>) {
         let seq = self.log_seq.fetch_add(1, Ordering::Relaxed);
-        let entry = LogEntry { seq, elapsed_ms: self.elapsed_ms(), channel, summary, payload };
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let entry = LogEntry { seq, elapsed_ms: self.elapsed_ms(), timestamp_ms, channel, summary, payload };
         if let Ok(mut log) = self.log.lock() {
             if log.len() >= LOG_CAPACITY {
                 log.pop_front();
