@@ -80,19 +80,8 @@ async fn main() -> anyhow::Result<()> {
         println!("  Recording:  {}", dir.display());
     }
 
-    let dashboard_handle = if config.dashboard_port != 0 {
-        let bind_dash = std::net::SocketAddr::new(config.bind, config.dashboard_port);
-        let display_host = if config.bind.is_unspecified() { "localhost".to_string() } else { config.bind.to_string() };
-        println!("  Dashboard:  http://{}:{}", display_host, config.dashboard_port);
-        let metrics_d = proxy_metrics.clone();
-        Some(tokio::spawn(async move {
-            if let Err(e) = dashboard::run(bind_dash, metrics_d).await {
-                error!("Dashboard error: {}", e);
-            }
-        }))
-    } else {
-        None
-    };
+    // Dashboard is spawned after WireGuard (below) so it can include WG info.
+
     // Load hook scripts.
     let hook_engine = if !config.hooks.is_empty() {
         println!("  Hooks:      {} script(s)", config.hooks.len());
@@ -146,10 +135,47 @@ async fn main() -> anyhow::Result<()> {
     };
 
     #[cfg(not(feature = "wireguard"))]
-    if config.wireguard {
+    let _wg_info: Option<()> = if config.wireguard {
         error!("WireGuard support not compiled in. Rebuild with: cargo build --features wireguard");
         return Err(anyhow::anyhow!("WireGuard feature not enabled"));
-    }
+    } else {
+        None
+    };
+
+    // Spawn dashboard (after WireGuard so it can include QR code).
+    let dashboard_handle = if config.dashboard_port != 0 {
+        let bind_dash = std::net::SocketAddr::new(config.bind, config.dashboard_port);
+        let display_host = if config.bind.is_unspecified() { "localhost".to_string() } else { config.bind.to_string() };
+        println!("  Dashboard:  http://{}:{}", display_host, config.dashboard_port);
+        let metrics_d = proxy_metrics.clone();
+
+        #[cfg(feature = "wireguard")]
+        let dash_handle = if let Some(ref wg) = _wg_info {
+            let wg = wg.clone();
+            Some(tokio::spawn(async move {
+                if let Err(e) = dashboard::run_with_wg(bind_dash, metrics_d, &wg).await {
+                    error!("Dashboard error: {}", e);
+                }
+            }))
+        } else {
+            Some(tokio::spawn(async move {
+                if let Err(e) = dashboard::run(bind_dash, metrics_d).await {
+                    error!("Dashboard error: {}", e);
+                }
+            }))
+        };
+
+        #[cfg(not(feature = "wireguard"))]
+        let dash_handle = Some(tokio::spawn(async move {
+            if let Err(e) = dashboard::run(bind_dash, metrics_d).await {
+                error!("Dashboard error: {}", e);
+            }
+        }));
+
+        dash_handle
+    } else {
+        None
+    };
     println!();
 
     let recorder_c = recorder.clone();

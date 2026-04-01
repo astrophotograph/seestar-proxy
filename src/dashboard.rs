@@ -10,7 +10,7 @@ use axum::{
     extract::State,
     response::{
         sse::{Event, KeepAlive},
-        Html, Sse,
+        Html, IntoResponse, Sse,
     },
     routing::get,
     Router,
@@ -22,6 +22,16 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::info;
+
+/// Shared state for the dashboard (metrics + optional WireGuard info).
+#[derive(Clone)]
+pub struct DashboardState {
+    pub metrics: Arc<Metrics>,
+    pub wg_config: Option<String>,
+    pub wg_qr_svg: Option<String>,
+    pub wg_enabled: bool,
+    pub wg_endpoint: Option<String>,
+}
 
 static HTML: &str = r##"<!DOCTYPE html>
 <html lang="en"><head>
@@ -185,6 +195,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
   </div>
 </div>
 
+<!-- WG_SECTION -->
+
 <div class="panel">
   <div class="log-hdr">
     <div class="ptitle" style="margin:0"><span class="pdot"></span>Live Traffic</div>
@@ -307,11 +319,41 @@ struct SseState {
 
 /// Run the dashboard HTTP server.
 pub async fn run(bind: std::net::SocketAddr, metrics: Arc<Metrics>) -> anyhow::Result<()> {
+    let state = DashboardState {
+        metrics,
+        wg_config: None,
+        wg_qr_svg: None,
+        wg_enabled: false,
+        wg_endpoint: None,
+    };
+    run_with_state(bind, state).await
+}
+
+/// Start the dashboard with WireGuard info included.
+#[cfg(feature = "wireguard")]
+pub async fn run_with_wg(
+    bind: std::net::SocketAddr,
+    metrics: Arc<Metrics>,
+    wg_info: &crate::wireguard::WgInfo,
+) -> anyhow::Result<()> {
+    let state = DashboardState {
+        metrics,
+        wg_config: Some(wg_info.client_config.clone()),
+        wg_qr_svg: Some(wg_info.client_config_svg.clone()),
+        wg_enabled: true,
+        wg_endpoint: Some(wg_info.endpoint.clone()),
+    };
+    run_with_state(bind, state).await
+}
+
+async fn run_with_state(bind: std::net::SocketAddr, state: DashboardState) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(root))
         .route("/api/stream", get(sse_handler))
         .route("/api/stats", get(stats_handler))
-        .with_state(metrics);
+        .route("/api/wg-config", get(wg_config_handler))
+        .route("/api/wg-qr", get(wg_qr_handler))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!("Dashboard listening on http://{}", bind);
@@ -319,17 +361,66 @@ pub async fn run(bind: std::net::SocketAddr, metrics: Arc<Metrics>) -> anyhow::R
     Ok(())
 }
 
-async fn root() -> Html<&'static str> {
-    Html(HTML)
+async fn root(State(ds): State<DashboardState>) -> Html<String> {
+    let html = if ds.wg_enabled {
+        // Inject WireGuard section into the HTML.
+        let wg_section = format!(
+            r#"<div class="card" id="wg-card" style="grid-column:1/-1">
+<div class="card-title">WireGuard Tunnel</div>
+<div style="display:flex;gap:24px;align-items:flex-start;flex-wrap:wrap">
+<div style="flex:0 0 auto">{}</div>
+<div style="flex:1;min-width:300px">
+<div class="stat-label">Status</div><div class="stat-value" style="color:var(--green)">Enabled</div>
+<div class="stat-label" style="margin-top:8px">Endpoint</div><div class="stat-value">{}</div>
+<div class="stat-label" style="margin-top:8px">Config</div>
+<pre style="background:rgba(0,0,0,.3);padding:8px;border-radius:4px;font-size:10px;overflow-x:auto;max-width:400px;white-space:pre-wrap;color:var(--dim)">{}</pre>
+<div style="margin-top:8px;font-size:11px;color:var(--muted)">Scan the QR code with the WireGuard app, or copy the config above.</div>
+</div></div></div>"#,
+            ds.wg_qr_svg.as_deref().unwrap_or(""),
+            ds.wg_endpoint.as_deref().unwrap_or("?"),
+            ds.wg_config.as_deref().unwrap_or(""),
+        );
+        HTML.replace("<!-- WG_SECTION -->", &wg_section)
+    } else {
+        HTML.to_string()
+    };
+    Html(html)
 }
 
-async fn stats_handler(State(m): State<Arc<Metrics>>) -> axum::Json<serde_json::Value> {
-    axum::Json(build_payload(&m, 0.0, 0.0, 0.0, vec![]))
+async fn wg_config_handler(State(ds): State<DashboardState>) -> impl IntoResponse {
+    match ds.wg_config {
+        Some(config) => (
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            config,
+        ).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "WireGuard not enabled",
+        ).into_response(),
+    }
+}
+
+async fn wg_qr_handler(State(ds): State<DashboardState>) -> impl IntoResponse {
+    match ds.wg_qr_svg {
+        Some(svg) => (
+            [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+            svg,
+        ).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            "WireGuard not enabled",
+        ).into_response(),
+    }
+}
+
+async fn stats_handler(State(ds): State<DashboardState>) -> axum::Json<serde_json::Value> {
+    axum::Json(build_payload(&ds.metrics, 0.0, 0.0, 0.0, vec![]))
 }
 
 async fn sse_handler(
-    State(metrics): State<Arc<Metrics>>,
+    State(ds): State<DashboardState>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let metrics = ds.metrics;
     let state = SseState {
         next_log_seq: None,
         last_ctrl_rx: 0,
@@ -412,11 +503,20 @@ mod tests {
     use tower::ServiceExt; // for `.oneshot()`
 
     fn test_app(metrics: Arc<Metrics>) -> Router {
+        let state = DashboardState {
+            metrics,
+            wg_config: None,
+            wg_qr_svg: None,
+            wg_enabled: false,
+            wg_endpoint: None,
+        };
         Router::new()
             .route("/", get(root))
             .route("/api/stream", get(sse_handler))
             .route("/api/stats", get(stats_handler))
-            .with_state(metrics)
+            .route("/api/wg-config", get(wg_config_handler))
+            .route("/api/wg-qr", get(wg_qr_handler))
+            .with_state(state)
     }
 
     // ── build_payload ─────────────────────────────────────────────────────────
