@@ -107,12 +107,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .entry{border-bottom:1px solid rgba(42,48,100,.25);animation:fi .15s ease}
 .entry.has-payload{cursor:pointer}.entry.has-payload:hover .row{background:rgba(42,48,100,.15)}
 @keyframes fi{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:none}}
-.row{display:grid;grid-template-columns:72px 52px 1fr;gap:8px;padding:3px 0;font-family:var(--mono);font-size:11px;line-height:1.5;border-radius:3px}
+.row{display:grid;grid-template-columns:72px 60px 1fr;gap:8px;padding:3px 0;font-family:var(--mono);font-size:11px;line-height:1.5;border-radius:3px}
 .ts{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .ch{font-weight:600;white-space:nowrap;text-align:right}
 .ch.ctrl-rx{color:var(--cyan)}.ch.ctrl-tx{color:var(--orange)}.ch.ctrl-evt{color:var(--purple)}.ch.img{color:var(--green)}
 .sm{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.json-detail{display:none;margin:0 0 4px 132px;padding:6px 10px;background:rgba(0,0,0,.35);border-left:2px solid var(--border);border-radius:0 3px 3px 0;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--dim);white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto}
+.json-detail{display:none;margin:0 0 4px 148px;padding:6px 10px;background:rgba(0,0,0,.35);border-left:2px solid var(--border);border-radius:0 3px 3px 0;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--dim);white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto}
 .entry.open .json-detail{display:block}
 .expand-hint{font-size:9px;color:var(--muted);margin-left:4px;opacity:.6}
 .empty{color:var(--muted);font-family:var(--mono);font-size:11px;padding:24px 0;text-align:center}
@@ -219,7 +219,12 @@ function fmtBytes(n) {
   if (n < 1073741824) return (n/1048576).toFixed(1) + ' MB';
   return (n/1073741824).toFixed(2) + ' GB';
 }
-function fmtSecs(ms) { return (ms/1000).toFixed(3) + 's'; }
+function fmtTime(ts_ms) {
+  const d = new Date(ts_ms);
+  return String(d.getHours()).padStart(2,'0') + ':' +
+         String(d.getMinutes()).padStart(2,'0') + ':' +
+         String(d.getSeconds()).padStart(2,'0');
+}
 
 function update(s) {
   document.getElementById('uptime').textContent = fmt(s.uptime_ms);
@@ -274,7 +279,7 @@ function appendLog(entries) {
     lastSeq = e.seq;
     const entry = document.createElement('div'); entry.className = 'entry';
     const row = document.createElement('div'); row.className = 'row';
-    const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtSecs(e.elapsed_ms);
+    const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtTime(e.timestamp_ms);
     const ch = document.createElement('span'); ch.className = 'ch '+e.channel; ch.textContent = e.channel;
     const sm = document.createElement('span'); sm.className = 'sm'; sm.textContent = e.summary;
     row.append(ts, ch, sm);
