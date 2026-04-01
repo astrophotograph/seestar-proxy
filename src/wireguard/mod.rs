@@ -17,7 +17,9 @@
 //!                           control proxy       imaging proxy
 //! ```
 
+pub mod bridge;
 pub mod keys;
+pub mod netstack;
 pub mod qr;
 
 use boringtun::noise::{Tunn, TunnResult, errors::WireGuardError};
@@ -116,10 +118,35 @@ pub async fn start(
     let udp = UdpSocket::bind(listen_addr).await?;
     info!("WireGuard listening on UDP {}", listen_addr);
 
-    // Spawn the packet processing loop.
-    // For now, this handles the WireGuard handshake and logs decrypted packets.
-    // Full TCP reassembly via smoltcp will be added in Phase 3.
-    tokio::spawn(packet_loop(udp, tunn, upstream_ip, upstream_control_port, upstream_imaging_port));
+    // Start the userspace TCP/IP stack.
+    let upstream_v4 = match upstream_ip {
+        std::net::IpAddr::V4(v4) => v4,
+        _ => anyhow::bail!("WireGuard requires IPv4 upstream"),
+    };
+    let server_v4: std::net::Ipv4Addr = "10.99.0.1".parse().unwrap();
+    let (net_channels, mut conn_rx) = netstack::start(
+        server_v4,
+        upstream_v4,
+        upstream_control_port,
+        upstream_imaging_port,
+    );
+
+    // Spawn the bridge task: routes accepted tunnel TCP connections to local proxy.
+    let local_control_port = upstream_control_port;
+    let local_imaging_port = upstream_imaging_port;
+    tokio::spawn(async move {
+        while let Some(tunnel_stream) = conn_rx.recv().await {
+            let local_port = if tunnel_stream.dest_port == upstream_control_port {
+                local_control_port
+            } else {
+                local_imaging_port
+            };
+            tokio::spawn(bridge::bridge_to_local(tunnel_stream, local_port));
+        }
+    });
+
+    // Spawn the packet processing loop with netstack integration.
+    tokio::spawn(packet_loop(udp, tunn, net_channels));
 
     Ok(wg_info)
 }
@@ -131,21 +158,18 @@ pub async fn start(
 async fn packet_loop(
     udp: UdpSocket,
     mut tunn: Tunn,
-    _upstream_ip: std::net::IpAddr,
-    _control_port: u16,
-    _imaging_port: u16,
+    mut net: netstack::NetStackChannels,
 ) {
     let mut recv_buf = vec![0u8; 65536];
     let mut peer_addr: Option<SocketAddr> = None;
 
-    info!("WireGuard packet loop started");
+    info!("WireGuard packet loop started (with TCP stack)");
 
-    // Timer for WireGuard keepalive/handshake maintenance.
     let mut timer = tokio::time::interval(std::time::Duration::from_millis(250));
 
     loop {
         tokio::select! {
-            // Incoming UDP datagram.
+            // Incoming UDP datagram from WireGuard client.
             result = udp.recv_from(&mut recv_buf) => {
                 let (len, src) = match result {
                     Ok(r) => r,
@@ -157,19 +181,31 @@ async fn packet_loop(
 
                 peer_addr = Some(src);
 
-                // Decrypt the packet — loop to handle chained results.
+                // Decrypt — loop to handle chained results.
                 let mut dst = vec![0u8; 65536];
                 loop {
                     let tunn_result = tunn.decapsulate(None, &recv_buf[..len], &mut dst);
-                    match process_tunn_result(&udp, src, tunn_result).await {
+                    match process_tunn_result(&udp, src, tunn_result, &net.inject_tx).await {
                         TunnAction::Continue => {
-                            // More pending — call decapsulate with empty input.
                             let cont = tunn.decapsulate(None, &[], &mut dst);
-                            if matches!(process_tunn_result(&udp, src, cont).await, TunnAction::Done) {
+                            if matches!(process_tunn_result(&udp, src, cont, &net.inject_tx).await, TunnAction::Done) {
                                 break;
                             }
                         }
                         TunnAction::Done => break,
+                    }
+                }
+            }
+
+            // Outgoing IP packets from smoltcp → encrypt and send via WireGuard.
+            Some(packet) = net.egress_rx.recv() => {
+                if let Some(addr) = peer_addr {
+                    let mut dst = vec![0u8; 65536];
+                    let result = tunn.encapsulate(&packet, &mut dst);
+                    if let TunnResult::WriteToNetwork(data) = result {
+                        if let Err(e) = udp.send_to(data, addr).await {
+                            warn!("WireGuard send error: {}", e);
+                        }
                     }
                 }
             }
@@ -179,7 +215,7 @@ async fn packet_loop(
                 if let Some(addr) = peer_addr {
                     let mut dst = vec![0u8; 65536];
                     let tunn_result = tunn.update_timers(&mut dst);
-                    let _ = process_tunn_result(&udp, addr, tunn_result).await;
+                    let _ = process_tunn_result(&udp, addr, tunn_result, &net.inject_tx).await;
                 }
             }
         }
@@ -194,6 +230,7 @@ async fn process_tunn_result(
     udp: &UdpSocket,
     peer: SocketAddr,
     result: TunnResult<'_>,
+    inject_tx: &mpsc::Sender<Vec<u8>>,
 ) -> TunnAction {
     match result {
         TunnResult::Done => TunnAction::Done,
@@ -234,7 +271,10 @@ async fn process_tunn_result(
                     );
                 }
             }
-            // TODO: Feed into smoltcp for TCP reassembly.
+            // Feed decrypted IP packet into the userspace TCP stack.
+            if inject_tx.try_send(data.to_vec()).is_err() {
+                warn!("NetStack inject channel full, dropping packet");
+            }
             TunnAction::Done
         }
 
