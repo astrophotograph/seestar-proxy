@@ -58,6 +58,27 @@ pub struct Config {
     #[arg(long = "hook")]
     pub hooks: Vec<std::path::PathBuf>,
 
+    /// Enable WireGuard tunnel endpoint for cross-subnet access
+    #[arg(long)]
+    pub wireguard: bool,
+
+    /// WireGuard UDP listen port
+    #[arg(long, default_value = "51820")]
+    pub wg_port: u16,
+
+    /// WireGuard tunnel subnet (server gets .1, first client gets .2)
+    #[arg(long, default_value = "10.99.0.0/24")]
+    pub wg_subnet: String,
+
+    /// WireGuard key file path
+    #[arg(long, default_value = "~/.seestar-proxy/wg.key")]
+    pub wg_key_file: std::path::PathBuf,
+
+    /// External endpoint for WireGuard client config (e.g., mypi.duckdns.org:51820).
+    /// Auto-detected if not specified.
+    #[arg(long)]
+    pub wg_endpoint: Option<String>,
+
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]
     pub verbose: u8,

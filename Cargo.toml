@@ -18,6 +18,18 @@ axum = "0.7"
 futures-util = "0.3"
 mlua = { version = "0.10", features = ["luajit", "vendored", "async", "send", "serialize"] }
 
+# WireGuard tunnel (feature-gated)
+boringtun = { version = "0.7", optional = true }
+smoltcp = { version = "0.12", optional = true, default-features = false, features = ["medium-ip", "proto-ipv4", "socket-tcp", "async"] }
+qrcode = { version = "0.14", optional = true, default-features = false, features = ["svg"] }
+x25519-dalek = { version = "2", optional = true, features = ["static_secrets"] }
+base64 = { version = "0.22", optional = true }
+rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
+
+[features]
+default = []
+wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:base64", "dep:rand_core"]
+
 [dev-dependencies]
 tower = "0.5"
 tempfile = "3"

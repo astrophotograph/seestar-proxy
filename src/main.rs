@@ -106,6 +106,50 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+
+    // Start WireGuard tunnel if enabled.
+    #[cfg(feature = "wireguard")]
+    let _wg_info = if config.wireguard {
+        let (control_inject_tx, _control_inject_rx) = tokio::sync::mpsc::channel::<TcpStream>(16);
+        let (imaging_inject_tx, _imaging_inject_rx) = tokio::sync::mpsc::channel::<TcpStream>(16);
+
+        // Expand ~ in key file path.
+        let key_file = if config.wg_key_file.starts_with("~") {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            std::path::PathBuf::from(config.wg_key_file.to_string_lossy().replacen('~', &home, 1))
+        } else {
+            config.wg_key_file.clone()
+        };
+
+        match seestar_proxy::wireguard::start(
+            config.bind,
+            config.wg_port,
+            &key_file,
+            config.wg_endpoint.clone(),
+            upstream_ip,
+            config.upstream_control_port,
+            config.upstream_imaging_port,
+            control_inject_tx,
+            imaging_inject_tx,
+        ).await {
+            Ok(info) => {
+                println!("  WireGuard:  udp://{}:{}", config.bind, config.wg_port);
+                Some(info)
+            }
+            Err(e) => {
+                error!("Failed to start WireGuard: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "wireguard"))]
+    if config.wireguard {
+        error!("WireGuard support not compiled in. Rebuild with: cargo build --features wireguard");
+        return Err(anyhow::anyhow!("WireGuard feature not enabled"));
+    }
     println!();
 
     let recorder_c = recorder.clone();

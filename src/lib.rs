@@ -7,3 +7,5 @@ pub mod imaging;
 pub mod metrics;
 pub mod protocol;
 pub mod recorder;
+#[cfg(feature = "wireguard")]
+pub mod wireguard;
