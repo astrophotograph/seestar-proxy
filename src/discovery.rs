@@ -135,15 +135,73 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
         Ok(Err(e)) => Err(e),
         Err(_) => {
             warn!("Discovery probe to {} timed out, using minimal info", upstream_addr);
-            // Return minimal info so the proxy can still function.
-            Ok(serde_json::json!({
-                "id": 201,
-                "result": {
-                    "product_model": "Seestar (via proxy)",
-                    "sn": "proxy",
-                    "tcp_client_num": 0
+            // Fallback: try TCP get_device_state to build a proper response.
+            warn!("Trying TCP fallback for device info...");
+            match fetch_device_info_tcp(upstream_addr).await {
+                Some(info) => Ok(info),
+                None => {
+                    // Last resort: minimal response with native format.
+                    Ok(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "Timestamp": "0",
+                        "method": "scan_iscope",
+                        "result": {
+                            "product_model": "Seestar (via proxy)",
+                            "sn": "proxy",
+                            "ssid": "Seestar_proxy",
+                            "is_verified": true,
+                            "tcp_client_num": 0
+                        },
+                        "code": 0,
+                        "id": 201
+                    }))
                 }
-            }))
+            }
         }
     }
 }
+
+/// Fetch device info via TCP get_device_state and build a discovery response.
+async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let addr = SocketAddr::new(upstream_addr, 4700);
+    let stream = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        TcpStream::connect(addr),
+    ).await.ok()?.ok()?;
+
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    writer.write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n").await.ok()?;
+
+    let mut line = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        reader.read_line(&mut line),
+    ).await.ok()?.ok()?;
+
+    let parsed: Value = serde_json::from_str(line.trim()).ok()?;
+    let result = parsed.get("result")?;
+
+    let discovery = serde_json::json!({
+        "jsonrpc": "2.0",
+        "Timestamp": "0",
+        "method": "scan_iscope",
+        "result": {
+            "sn": result.pointer("/device/sn").and_then(|v| v.as_str()).unwrap_or("unknown"),
+            "product_model": result.pointer("/device/product_model").and_then(|v| v.as_str()).unwrap_or("Seestar"),
+            "ssid": result.pointer("/ap/ssid").and_then(|v| v.as_str()).unwrap_or(""),
+            "is_verified": true,
+            "tcp_client_num": 0,
+        },
+        "code": 0,
+        "id": 201
+    });
+
+    info!("Built discovery response from TCP device state: {}", discovery);
+    Some(discovery)
+}
+
