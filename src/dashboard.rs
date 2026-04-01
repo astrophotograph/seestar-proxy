@@ -398,20 +398,16 @@ document.getElementById('btn-rec').addEventListener('click', () => {
 document.getElementById('btn-exp').addEventListener('click', () => {
   if (recordStore.length === 0) return;
   const ts = new Date(recordStart).toISOString().replace(/[:.]/g,'-').slice(0,19);
-  const rows = [['time','channel','summary','payload']];
-  for (const e of recordStore) {
-    rows.push([
-      new Date(e.timestamp_ms).toISOString(),
-      e.channel,
-      e.summary,
-      e.payload ? e.payload.replace(/\r?\n/g,' ') : ''
-    ]);
-  }
-  const csv = rows.map(r => r.map(f => '"' + String(f).replace(/"/g,'""') + '"').join(',')).join('\r\n');
-  const blob = new Blob([csv], {type:'text/csv'});
+  const lines = recordStore.map(e => JSON.stringify({
+    time:    new Date(e.timestamp_ms).toISOString(),
+    channel: e.channel,
+    summary: e.summary,
+    payload: e.payload ? JSON.parse(e.payload) : null,
+  }));
+  const blob = new Blob([lines.join('\n') + '\n'], {type:'application/x-ndjson'});
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'seestar-traffic-' + ts + '.csv';
+  a.download = 'seestar-traffic-' + ts + '.jsonl';
   a.click();
   URL.revokeObjectURL(a.href);
 });
