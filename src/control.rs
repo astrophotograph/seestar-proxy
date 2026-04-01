@@ -299,7 +299,7 @@ async fn handle_client(
             m.control_tx.fetch_add(1, Ordering::Relaxed);
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
                 let method = crate::protocol::method_name(&v).unwrap_or("?");
-                m.push_log("ctrl-tx", format!("{}", method));
+                m.push_log_with_payload("ctrl-tx", method.to_string(), Some(trimmed.to_string()));
             }
         }
 
@@ -533,7 +533,7 @@ async fn upstream_reader_task(
                 debug!("Event: {}", event_name);
                 if let Some(m) = &metrics {
                     m.control_events.fetch_add(1, Ordering::Relaxed);
-                    m.push_log("ctrl-evt", event_name.to_string());
+                    m.push_log_with_payload("ctrl-evt", event_name.to_string(), Some(trimmed.clone()));
                 }
 
                 // Run event hook.
@@ -575,7 +575,7 @@ async fn upstream_reader_task(
                         pending.original_id
                     );
                     if let Some(m) = &metrics {
-                        m.push_log("ctrl-rx", method.to_string());
+                        m.push_log_with_payload("ctrl-rx", method.to_string(), Some(response_str.clone()));
                     }
 
                     if pending.client_tx.try_send(response_str).is_err() {

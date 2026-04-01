@@ -92,14 +92,19 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 /* Log */
 .log-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
-.log-cont{height:200px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(60,70,140,.5) transparent}
+.log-cont{height:320px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(60,70,140,.5) transparent}
 .log-cont::-webkit-scrollbar{width:4px}.log-cont::-webkit-scrollbar-thumb{background:rgba(60,70,140,.6);border-radius:2px}
-.row{display:grid;grid-template-columns:72px 52px 1fr;gap:8px;padding:2px 0;border-bottom:1px solid rgba(42,48,100,.25);font-family:var(--mono);font-size:11px;line-height:1.5;animation:fi .15s ease}
+.entry{border-bottom:1px solid rgba(42,48,100,.25);animation:fi .15s ease}
+.entry.has-payload{cursor:pointer}.entry.has-payload:hover .row{background:rgba(42,48,100,.15)}
 @keyframes fi{from{opacity:0;transform:translateX(-4px)}to{opacity:1;transform:none}}
+.row{display:grid;grid-template-columns:72px 52px 1fr;gap:8px;padding:3px 0;font-family:var(--mono);font-size:11px;line-height:1.5;border-radius:3px}
 .ts{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
 .ch{font-weight:600;white-space:nowrap;text-align:right}
 .ch.ctrl-rx{color:var(--cyan)}.ch.ctrl-tx{color:var(--orange)}.ch.ctrl-evt{color:var(--purple)}.ch.img{color:var(--green)}
 .sm{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.json-detail{display:none;margin:0 0 4px 132px;padding:6px 10px;background:rgba(0,0,0,.35);border-left:2px solid var(--border);border-radius:0 3px 3px 0;font-family:var(--mono);font-size:10px;line-height:1.6;color:var(--dim);white-space:pre;overflow-x:auto;max-height:260px;overflow-y:auto}
+.entry.open .json-detail{display:block}
+.expand-hint{font-size:9px;color:var(--muted);margin-left:4px;opacity:.6}
 .empty{color:var(--muted);font-family:var(--mono);font-size:11px;padding:24px 0;text-align:center}
 
 /* Banner */
@@ -233,7 +238,8 @@ function update(s) {
 function drawChart() {
   const W=600, H=80, P=3;
   const mx = Math.max(1, ...ch, ...ih);
-  function pts(h) { return h.map((v,i) => [(P + i/(N-1)*(W-P*2)).toFixed(1),(H-P-(v/mx)*(H-P*2)).toFixed(1)]); }
+  // Baseline is pinned to H (bottom edge); only top gets padding P so peaks aren't clipped.
+  function pts(h) { return h.map((v,i) => [(P + i/(N-1)*(W-P*2)).toFixed(1),(H-(v/mx)*(H-P)).toFixed(1)]); }
   function line(h) { const p=pts(h); return 'M'+p.map(([x,y])=>x+','+y).join('L'); }
   function area(h) { const p=pts(h),l=p[p.length-1]; return line(h)+`L${l[0]},${H}L${P},${H}Z`; }
   document.getElementById('cl').setAttribute('d', line(ch));
@@ -250,13 +256,24 @@ function appendLog(entries) {
   for (const e of entries) {
     if (e.seq <= lastSeq) continue;
     lastSeq = e.seq;
+    const entry = document.createElement('div'); entry.className = 'entry';
     const row = document.createElement('div'); row.className = 'row';
     const ts = document.createElement('span'); ts.className = 'ts'; ts.textContent = fmtSecs(e.elapsed_ms);
     const ch = document.createElement('span'); ch.className = 'ch '+e.channel; ch.textContent = e.channel;
     const sm = document.createElement('span'); sm.className = 'sm'; sm.textContent = e.summary;
     row.append(ts, ch, sm);
-    log.appendChild(row);
-    while (log.children.length > 100) log.removeChild(log.firstChild);
+    entry.appendChild(row);
+    if (e.payload) {
+      entry.classList.add('has-payload');
+      const detail = document.createElement('div'); detail.className = 'json-detail';
+      try { detail.textContent = JSON.stringify(JSON.parse(e.payload), null, 2); }
+      catch { detail.textContent = e.payload; }
+      entry.appendChild(detail);
+      entry.addEventListener('click', () => entry.classList.toggle('open'));
+    }
+    log.appendChild(entry);
+    const allEntries = log.querySelectorAll('.entry');
+    if (allEntries.length > 100) allEntries[0].remove();
   }
   if (atBottom) log.scrollTop = log.scrollHeight;
 }

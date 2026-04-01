@@ -15,6 +15,8 @@ pub struct LogEntry {
     /// CSS channel name: "ctrl-rx", "ctrl-tx", "ctrl-evt", "img"
     pub channel: &'static str,
     pub summary: String,
+    /// Raw JSON payload for display in the dashboard, if available.
+    pub payload: Option<String>,
 }
 
 /// Shared metrics state, updated by control/imaging modules and read by the dashboard.
@@ -69,8 +71,13 @@ impl Metrics {
 
     /// Append a traffic log entry, dropping the oldest if the buffer is full.
     pub fn push_log(&self, channel: &'static str, summary: String) {
+        self.push_log_with_payload(channel, summary, None);
+    }
+
+    /// Like [`push_log`] but also stores the raw JSON payload for dashboard display.
+    pub fn push_log_with_payload(&self, channel: &'static str, summary: String, payload: Option<String>) {
         let seq = self.log_seq.fetch_add(1, Ordering::Relaxed);
-        let entry = LogEntry { seq, elapsed_ms: self.elapsed_ms(), channel, summary };
+        let entry = LogEntry { seq, elapsed_ms: self.elapsed_ms(), channel, summary, payload };
         if let Ok(mut log) = self.log.lock() {
             if log.len() >= LOG_CAPACITY {
                 log.pop_front();
