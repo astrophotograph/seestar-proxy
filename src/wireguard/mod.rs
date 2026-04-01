@@ -18,6 +18,7 @@
 //! ```
 
 pub mod bridge;
+pub mod dns;
 pub mod keys;
 pub mod netstack;
 pub mod qr;
@@ -502,6 +503,15 @@ async fn handle_decrypted_packet(
     udp: &UdpSocket,
     peer: SocketAddr,
 ) {
+    // Check for DNS query — intercept Seestar-related names.
+    if let Some(response) = dns::handle_dns_query(pkt, upstream_ip) {
+        let mut enc = vec![0u8; 65536];
+        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&response, &mut enc) {
+            let _ = udp.send_to(data, peer).await;
+        }
+        return;
+    }
+
     // Check for UDP discovery broadcast.
     if let Some(response) = tunnel_discovery::handle_discovery(pkt, upstream_ip, device_info_json) {
         let mut enc = vec![0u8; 65536];

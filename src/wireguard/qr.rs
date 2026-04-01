@@ -15,7 +15,7 @@ pub fn client_config(
         "[Interface]\n\
          PrivateKey = {}\n\
          Address = {}\n\
-         DNS = 1.1.1.1\n\
+         DNS = 10.99.0.1, 1.1.1.1\n\
          \n\
          [Peer]\n\
          PublicKey = {}\n\
