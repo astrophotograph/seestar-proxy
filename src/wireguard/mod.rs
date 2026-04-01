@@ -21,6 +21,7 @@ pub mod bridge;
 pub mod keys;
 pub mod netstack;
 pub mod qr;
+pub mod tunnel_discovery;
 
 use boringtun::noise::{Tunn, TunnResult, errors::WireGuardError};
 use keys::{WgKeypair, generate_client_keypair, private_key_b64, public_key_b64};
@@ -145,20 +146,80 @@ pub async fn start(
         }
     });
 
-    // Spawn the packet processing loop with netstack integration.
-    tokio::spawn(packet_loop(udp, tunn, net_channels));
+    // Fetch device info from the Seestar for tunnel discovery responses.
+    let device_info_json = fetch_device_info(upstream_ip, upstream_control_port).await;
+
+    // Spawn the packet processing loop with netstack + discovery injection.
+    tokio::spawn(packet_loop(udp, tunn, net_channels, upstream_v4.octets(), device_info_json));
 
     Ok(wg_info)
+}
+
+/// Fetch device info from the real Seestar for discovery response injection.
+async fn fetch_device_info(upstream_ip: std::net::IpAddr, control_port: u16) -> String {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpStream;
+
+    let addr = SocketAddr::new(upstream_ip, control_port);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let stream = TcpStream::connect(addr).await?;
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+
+        // Send get_device_state to get the telescope info.
+        writer.write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n").await?;
+
+        let mut line = String::new();
+        reader.read_line(&mut line).await?;
+        Ok::<String, anyhow::Error>(line)
+    }).await {
+        Ok(Ok(response)) => {
+            // Wrap in a discovery-style response.
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim()) {
+                let result = parsed.get("result").cloned().unwrap_or(serde_json::json!({}));
+                let discovery_response = serde_json::json!({
+                    "id": 201,
+                    "result": {
+                        "sn": result.pointer("/device/sn").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                        "product_model": result.pointer("/device/product_model").and_then(|v| v.as_str()).unwrap_or("Seestar"),
+                        "tcp_client_num": 0,
+                    }
+                });
+                info!("Cached device info for tunnel discovery: {}", discovery_response);
+                serde_json::to_string(&discovery_response).unwrap_or_default()
+            } else {
+                warn!("Could not parse device state for tunnel discovery");
+                default_device_info()
+            }
+        }
+        _ => {
+            warn!("Could not fetch device info for tunnel discovery, using default");
+            default_device_info()
+        }
+    }
+}
+
+fn default_device_info() -> String {
+    serde_json::json!({
+        "id": 201,
+        "result": {
+            "sn": "proxy",
+            "product_model": "Seestar (via proxy)",
+            "tcp_client_num": 0,
+        }
+    }).to_string()
 }
 
 /// Main packet processing loop.
 ///
 /// Receives encrypted UDP datagrams, decrypts via boringtun, and processes
-/// the resulting IP packets.
+/// the resulting IP packets. UDP discovery broadcasts are handled inline.
 async fn packet_loop(
     udp: UdpSocket,
     mut tunn: Tunn,
     mut net: netstack::NetStackChannels,
+    upstream_ip_bytes: [u8; 4],
+    device_info_json: String,
 ) {
     let mut recv_buf = vec![0u8; 65536];
     let mut peer_addr: Option<SocketAddr> = None;
@@ -188,9 +249,30 @@ async fn packet_loop(
                     match process_tunn_result(&udp, src, tunn_result, &net.inject_tx).await {
                         TunnAction::Continue => {
                             let cont = tunn.decapsulate(None, &[], &mut dst);
-                            if matches!(process_tunn_result(&udp, src, cont, &net.inject_tx).await, TunnAction::Done) {
-                                break;
+                            match process_tunn_result(&udp, src, cont, &net.inject_tx).await {
+                                TunnAction::Decrypted(pkt) => {
+                                    // Check for discovery and respond.
+                                    if let Some(response) = tunnel_discovery::handle_discovery(&pkt, upstream_ip_bytes, &device_info_json) {
+                                        let mut enc = vec![0u8; 65536];
+                                        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&response, &mut enc) {
+                                            let _ = udp.send_to(data, src).await;
+                                        }
+                                    }
+                                    break;
+                                }
+                                TunnAction::Done => break,
+                                TunnAction::Continue => {} // keep looping
                             }
+                        }
+                        TunnAction::Decrypted(pkt) => {
+                            // Check for discovery and respond.
+                            if let Some(response) = tunnel_discovery::handle_discovery(&pkt, upstream_ip_bytes, &device_info_json) {
+                                let mut enc = vec![0u8; 65536];
+                                if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&response, &mut enc) {
+                                    let _ = udp.send_to(data, src).await;
+                                }
+                            }
+                            break;
                         }
                         TunnAction::Done => break,
                     }
@@ -272,10 +354,11 @@ async fn process_tunn_result(
                 }
             }
             // Feed decrypted IP packet into the userspace TCP stack.
+            // Discovery interception happens in the packet loop (needs &mut tunn).
             if inject_tx.try_send(data.to_vec()).is_err() {
                 warn!("NetStack inject channel full, dropping packet");
             }
-            TunnAction::Done
+            TunnAction::Decrypted(data.to_vec())
         }
 
         TunnResult::WriteToTunnelV6(_, _) => {
@@ -298,4 +381,7 @@ async fn process_tunn_result(
 enum TunnAction {
     Done,
     Continue,
+    /// A decrypted IPv4 packet was received and injected into the TCP stack.
+    /// The packet bytes are returned so the caller can also check for UDP discovery.
+    Decrypted(Vec<u8>),
 }

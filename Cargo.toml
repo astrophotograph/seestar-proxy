@@ -27,7 +27,7 @@ base64 = { version = "0.22", optional = true }
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 
 [features]
-default = []
+default = ["wireguard"]
 wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:base64", "dep:rand_core"]
 
 [dev-dependencies]
