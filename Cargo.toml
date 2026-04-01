@@ -3,7 +3,7 @@ name = "seestar-proxy"
 version = "0.1.0"
 edition = "2024"
 description = "TCP proxy and multiplexer for Seestar smart telescopes"
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
