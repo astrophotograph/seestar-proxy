@@ -16,7 +16,7 @@ chrono = "0.4"
 anyhow = "1"
 axum = "0.7"
 futures-util = "0.3"
-mlua = { version = "0.10", features = ["luajit", "async", "send", "serialize"] }
+mlua = { version = "0.10", features = ["luajit", "vendored", "async", "send", "serialize"] }
 
 [dev-dependencies]
 tower = "0.5"
