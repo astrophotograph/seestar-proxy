@@ -79,13 +79,10 @@ pub async fn start(
     });
 
     // Build client config and QR.
-    // Use /24 subnet so discovery broadcasts (to the subnet broadcast addr) are routed.
-    let allowed_ips = if let std::net::IpAddr::V4(v4) = upstream_ip {
-        let o = v4.octets();
-        format!("{}.{}.{}.0/24", o[0], o[1], o[2])
-    } else {
-        format!("{}/32", upstream_ip)
-    };
+    // Route all traffic through the tunnel so UDP discovery broadcasts
+    // (which go to 255.255.255.255 or subnet broadcast) are captured.
+    // The phone's internet will also go through the proxy machine.
+    let allowed_ips = "0.0.0.0/0";
     let client_config = qr::client_config(
         &client_priv_b64,
         "10.99.0.2/32",
