@@ -68,11 +68,22 @@ pub async fn start(
 
     // Determine endpoint for client config.
     let endpoint_str = endpoint.unwrap_or_else(|| {
-        format!("{}:{}", bind_addr, port)
+        // Try to detect a non-loopback IP for the endpoint.
+        let detected = detect_local_ip().unwrap_or_else(|| bind_addr.to_string());
+        if detected == "0.0.0.0" || detected == "::" {
+            warn!("Could not detect external IP. Use --wg-endpoint to set the proxy's reachable address.");
+        }
+        format!("{}:{}", detected, port)
     });
 
     // Build client config and QR.
-    let allowed_ips = format!("{}/32", upstream_ip);
+    // Use /24 subnet so discovery broadcasts (to the subnet broadcast addr) are routed.
+    let allowed_ips = if let std::net::IpAddr::V4(v4) = upstream_ip {
+        let o = v4.octets();
+        format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+    } else {
+        format!("{}/32", upstream_ip)
+    };
     let client_config = qr::client_config(
         &client_priv_b64,
         "10.99.0.2/32",
@@ -196,6 +207,22 @@ async fn fetch_device_info(upstream_ip: std::net::IpAddr, control_port: u16) -> 
             warn!("Could not fetch device info for tunnel discovery, using default");
             default_device_info()
         }
+    }
+}
+
+/// Try to detect a non-loopback local IP address for the WireGuard endpoint.
+fn detect_local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    // Connect to an external address (doesn't actually send data) to determine
+    // which local interface would be used.
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    let ip = addr.ip();
+    if ip.is_loopback() || ip.is_unspecified() {
+        None
+    } else {
+        Some(ip.to_string())
     }
 }
 
