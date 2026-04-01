@@ -54,6 +54,10 @@ pub struct Config {
     #[arg(long, default_value = "4090")]
     pub dashboard_port: u16,
 
+    /// Lua hook script (can be specified multiple times)
+    #[arg(long = "hook")]
+    pub hooks: Vec<std::path::PathBuf>,
+
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]
     pub verbose: u8,

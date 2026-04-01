@@ -7,6 +7,7 @@
 //! - Broadcasts async events (no `id`) to all connected clients
 //! - Sends heartbeats only after handshake completes
 
+use crate::hooks::{HookAction, HookEngine};
 use crate::metrics::Metrics;
 use crate::protocol;
 use crate::recorder::Recorder;
@@ -48,6 +49,7 @@ pub async fn run(
     upstream_addr: std::net::SocketAddr,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
+    hooks: Option<Arc<HookEngine>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Control proxy listening on {}", bind_addr);
@@ -76,6 +78,7 @@ pub async fn run(
         let handshake_done = handshake_done.clone();
         let upstream_tx_hb = upstream_tx.clone();
         let metrics_up = metrics.clone();
+        let hooks_up = hooks.clone();
 
         tokio::spawn(async move {
             // Wait until a client connects.
@@ -109,6 +112,7 @@ pub async fn run(
             let recorder_r = recorder;
             let handshake_done_r = handshake_done.clone();
             let metrics_r = metrics_up.clone();
+            let hooks_r = hooks_up;
             tokio::spawn(upstream_reader_task(
                 upstream_reader,
                 state_r,
@@ -116,6 +120,7 @@ pub async fn run(
                 recorder_r,
                 handshake_done_r,
                 metrics_r,
+                hooks_r,
             ));
 
             // Spawn upstream writer (reads from channel, writes to socket).
@@ -174,9 +179,13 @@ pub async fn run(
         let next_id = next_id.clone();
         let recorder = recorder.clone();
         let metrics_c = metrics.clone();
+        let hooks_c = hooks.clone();
 
         if let Some(m) = &metrics {
             m.control_clients.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(h) = &hooks {
+            h.on_client_connect(&client_addr.to_string(), "control").await;
         }
         tokio::spawn(async move {
             if let Err(e) = handle_client(
@@ -187,6 +196,7 @@ pub async fn run(
                 next_id,
                 recorder,
                 metrics_c.clone(),
+                hooks_c.clone(),
             )
             .await
             {
@@ -194,6 +204,9 @@ pub async fn run(
             }
             if let Some(m) = &metrics_c {
                 m.control_clients.fetch_sub(1, Ordering::Relaxed);
+            }
+            if let Some(h) = &hooks_c {
+                h.on_client_disconnect(&client_addr.to_string(), "control").await;
             }
             info!("Control client disconnected: {}", client_addr);
         });
@@ -209,6 +222,7 @@ async fn handle_client(
     next_id: Arc<AtomicU64>,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
+    hooks: Option<Arc<HookEngine>>,
 ) -> anyhow::Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -296,6 +310,23 @@ async fn handle_client(
                 continue;
             }
         };
+
+        // Run request hook before forwarding.
+        if let Some(h) = &hooks {
+            match h.on_request(&msg).await {
+                HookAction::Forward => {}
+                HookAction::Block => {
+                    debug!("Hook blocked request: {}", &trimmed[..trimmed.len().min(100)]);
+                    continue;
+                }
+                HookAction::Modify(new_json) => {
+                    match serde_json::from_str(&new_json) {
+                        Ok(v) => msg = v,
+                        Err(e) => warn!("Hook returned invalid JSON: {}", e),
+                    }
+                }
+            }
+        }
 
         // Use get_id() which accepts any non-null JSON value (including
         // negative integers and strings) rather than json_rpc_id() which only
@@ -407,6 +438,7 @@ async fn upstream_reader_task(
     recorder: Option<Arc<Recorder>>,
     handshake_done: Arc<AtomicBool>,
     metrics: Option<Arc<Metrics>>,
+    hooks: Option<Arc<HookEngine>>,
 ) {
     info!("Upstream reader started, waiting for telescope messages...");
     if let Some(m) = &metrics {
@@ -489,6 +521,13 @@ async fn upstream_reader_task(
                 }
             };
 
+            // Update telescope state in hook engine for state-aware scripts.
+            if let Some(h) = &hooks {
+                if protocol::is_event(&msg) {
+                    h.update_telescope_state(&msg).await;
+                }
+            }
+
             if protocol::is_event(&msg) {
                 let event_name = msg.get("Event").and_then(|v| v.as_str()).unwrap_or("?");
                 debug!("Event: {}", event_name);
@@ -496,7 +535,23 @@ async fn upstream_reader_task(
                     m.control_events.fetch_add(1, Ordering::Relaxed);
                     m.push_log("ctrl-evt", event_name.to_string());
                 }
-                let _ = event_tx.send(trimmed);
+
+                // Run event hook.
+                let should_forward = if let Some(h) = &hooks {
+                    match h.on_event(&msg).await {
+                        HookAction::Forward => true,
+                        HookAction::Block => {
+                            debug!("Hook blocked event: {}", event_name);
+                            false
+                        }
+                        HookAction::Modify(_) => true, // Can't modify events meaningfully
+                    }
+                } else {
+                    true
+                };
+                if should_forward {
+                    let _ = event_tx.send(trimmed);
+                }
             } else if let Some(remapped_id) = protocol::json_rpc_id(&msg) {
                 if let Some(m) = &metrics {
                     m.control_rx.fetch_add(1, Ordering::Relaxed);
@@ -593,7 +648,7 @@ mod tests {
         let state = pending_state(10000, client_tx, 42);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        let task = tokio::spawn(upstream_reader_task(reader, state.clone(), event_tx, None, handshake_done, None));
+        let task = tokio::spawn(upstream_reader_task(reader, state.clone(), event_tx, None, handshake_done, None, None));
 
         mock_telescope
             .write_all(b"{\"id\":10000,\"code\":0,\"result\":null}\r\n")
@@ -625,7 +680,7 @@ mod tests {
         let state = pending_state(99999, client_tx, 7);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None));
+        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None));
 
         mock_telescope
             .write_all(b"{\"id\":99999,\"code\":0,\"result\":{\"foo\":\"bar\"}}\r\n")
@@ -664,7 +719,7 @@ mod tests {
         }));
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None));
+        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None));
 
         // Send responses out of order
         mock_telescope
@@ -698,7 +753,7 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None));
+        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None));
 
         mock_telescope
             .write_all(b"{\"Event\":\"PiStatus\",\"temp\":42.0}\r\n")
@@ -724,7 +779,7 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None));
+        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None));
 
         mock_telescope
             .write_all(b"{\"id\":55555,\"code\":0}\r\n")
@@ -747,7 +802,7 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None));
+        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None));
 
         // Invalid JSON followed by a valid event — the valid one should arrive
         mock_telescope
@@ -775,7 +830,7 @@ mod tests {
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None));
+        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None));
 
         mock_telescope.write_all(b"\r\n  \r\n").await.unwrap();
         mock_telescope

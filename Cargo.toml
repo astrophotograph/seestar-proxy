@@ -16,9 +16,11 @@ chrono = "0.4"
 anyhow = "1"
 axum = "0.7"
 futures-util = "0.3"
+mlua = { version = "0.10", features = ["luajit", "async", "send", "serialize"] }
 
 [dev-dependencies]
 tower = "0.5"
+tempfile = "3"
 
 [profile.release]
 opt-level = "s"    # Optimize for size (good for Pi)

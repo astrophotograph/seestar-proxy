@@ -1,5 +1,5 @@
 use clap::Parser;
-use seestar_proxy::{control, dashboard, discovery, imaging, metrics, protocol};
+use seestar_proxy::{control, dashboard, discovery, hooks, imaging, metrics, protocol};
 use seestar_proxy::config::Config;
 use seestar_proxy::recorder::Recorder;
 use std::net::SocketAddr;
@@ -93,12 +93,26 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    // Load hook scripts.
+    let hook_engine = if !config.hooks.is_empty() {
+        println!("  Hooks:      {} script(s)", config.hooks.len());
+        match hooks::HookEngine::new(&config.hooks) {
+            Ok(engine) => Some(Arc::new(engine)),
+            Err(e) => {
+                error!("Failed to load hook scripts: {}", e);
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
     println!();
 
     let recorder_c = recorder.clone();
     let metrics_c = proxy_metrics.clone();
+    let hooks_c = hook_engine.clone();
     let control_handle = tokio::spawn(async move {
-        if let Err(e) = control::run(bind_control, upstream_control, recorder_c, Some(metrics_c)).await {
+        if let Err(e) = control::run(bind_control, upstream_control, recorder_c, Some(metrics_c), hooks_c).await {
             error!("Control proxy error: {}", e);
         }
     });
