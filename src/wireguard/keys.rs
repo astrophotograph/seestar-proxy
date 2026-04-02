@@ -3,7 +3,7 @@
 use base64::prelude::*;
 use rand_core::OsRng;
 use std::path::Path;
-use tracing::info;
+use tracing::{info, warn};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// A WireGuard keypair (private + derived public key).
@@ -36,21 +36,34 @@ impl WgKeypair {
             Ok(Self { private, public })
         } else {
             let keypair = Self::generate();
-            // Create parent directory if needed.
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
+            // Try to persist the key. If the filesystem is read-only (common
+            // on some Raspberry Pi setups), fall back to an ephemeral key.
+            match Self::try_persist(&keypair, path) {
+                Ok(()) => info!("Generated new WireGuard key at {}", path.display()),
+                Err(e) => warn!(
+                    "Could not save WireGuard key to {} ({}). Using ephemeral key — \
+                     clients will need a new QR code after each restart.",
+                    path.display(), e
+                ),
             }
-            let encoded = BASE64_STANDARD.encode(keypair.private.as_bytes());
-            std::fs::write(path, format!("{}\n", encoded))?;
-            // Restrict permissions on Unix.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-            }
-            info!("Generated new WireGuard key at {}", path.display());
             Ok(keypair)
         }
+    }
+
+    /// Try to write the key to disk. Returns an error if the filesystem
+    /// is read-only or the directory can't be created.
+    fn try_persist(keypair: &Self, path: &Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let encoded = BASE64_STANDARD.encode(keypair.private.as_bytes());
+        std::fs::write(path, format!("{}\n", encoded))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(())
     }
 
     /// Base64-encoded public key (for config files and display).
