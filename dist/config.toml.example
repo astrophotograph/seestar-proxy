@@ -30,6 +30,10 @@
 # Lua hook scripts to load. Can list multiple.
 # hooks = ["/etc/seestar-proxy/hooks/authenticate.lua"]
 
+# Transparent proxy mode (Linux only). Resolve upstream address from
+# iptables REDIRECT via SO_ORIGINAL_DST. No --upstream needed.
+# transparent = false
+
 # Record traffic to a session directory.
 # record = "/var/lib/seestar-proxy/sessions"
 

@@ -46,7 +46,8 @@ struct ControlState {
 /// Run the control proxy.
 pub async fn run(
     bind_addr: std::net::SocketAddr,
-    upstream_addr: std::net::SocketAddr,
+    upstream_addr: Option<std::net::SocketAddr>,
+    transparent: bool,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
     hooks: Option<Arc<HookEngine>>,
@@ -68,6 +69,14 @@ pub async fn run(
     let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
     let upstream_started = Arc::new(Notify::new());
 
+    // In transparent mode, the upstream address is resolved from
+    // SO_ORIGINAL_DST on the first client connection.
+    let resolved_upstream: Arc<tokio::sync::OnceCell<std::net::SocketAddr>> =
+        Arc::new(tokio::sync::OnceCell::new());
+    if let Some(addr) = upstream_addr {
+        let _ = resolved_upstream.set(addr);
+    }
+
     // Give hook scripts access to the upstream channel immediately so they
     // can inject auth messages (e.g. authenticate.lua) when the first client connects.
     if let Some(h) = &hooks {
@@ -85,10 +94,18 @@ pub async fn run(
         let upstream_tx_hb = upstream_tx.clone();
         let metrics_up = metrics.clone();
         let hooks_up = hooks.clone();
+        let resolved_upstream = resolved_upstream.clone();
 
         tokio::spawn(async move {
             // Wait until a client connects before starting upstream work.
             upstream_started.notified().await;
+
+            // Get the upstream address (set by config or by first transparent client).
+            let upstream_addr = *resolved_upstream.get_or_init(|| async {
+                // This shouldn't happen — the accept loop sets it before notifying.
+                error!("BUG: upstream address not resolved before upstream task started");
+                std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4700)
+            }).await;
 
             // Heartbeat: spawned once, skips iterations while handshake pending.
             // Checks the flag each cycle so it re-gates correctly after reconnects.
@@ -206,6 +223,18 @@ pub async fn run(
         let (client_stream, client_addr) = listener.accept().await?;
         let _ = client_stream.set_nodelay(true);
         info!("Control client connected: {}", client_addr);
+
+        // In transparent mode, resolve upstream from SO_ORIGINAL_DST on first client.
+        #[cfg(unix)]
+        if transparent && resolved_upstream.get().is_none() {
+            use std::os::unix::io::AsRawFd;
+            if let Some(orig) = crate::transparent::get_original_dst(client_stream.as_raw_fd()) {
+                info!("Transparent mode: resolved upstream from SO_ORIGINAL_DST: {}", orig);
+                let _ = resolved_upstream.set(orig);
+            } else {
+                warn!("Transparent mode: SO_ORIGINAL_DST not available on this connection");
+            }
+        }
 
         // Trigger upstream connection on first client.
         if !upstream_started_once.swap(true, Ordering::Relaxed) {

@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,11 +24,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let upstream_host = config.upstream.as_deref().unwrap_or("seestar.local");
-    let upstream_ip = resolve_host(upstream_host).await?;
-
-    let upstream_control = SocketAddr::new(upstream_ip, config.upstream_control_port);
-    let upstream_imaging = SocketAddr::new(upstream_ip, config.upstream_imaging_port);
+    // Resolve upstream address — either from config or dynamically via SO_ORIGINAL_DST.
+    let (upstream_control, upstream_imaging) = if config.transparent && config.upstream.is_none() {
+        // Transparent mode without --upstream: address resolved at runtime from
+        // the first redirected client connection via SO_ORIGINAL_DST.
+        (None, None)
+    } else {
+        let upstream_host = config.upstream.as_deref().unwrap_or("seestar.local");
+        let upstream_ip = resolve_host(upstream_host).await?;
+        (
+            Some(SocketAddr::new(upstream_ip, config.upstream_control_port)),
+            Some(SocketAddr::new(upstream_ip, config.upstream_imaging_port)),
+        )
+    };
     let bind_control = SocketAddr::new(config.bind, config.control_port);
     let bind_imaging = SocketAddr::new(config.bind, config.imaging_port);
 
@@ -36,16 +44,17 @@ async fn main() -> anyhow::Result<()> {
 
     if config.raw {
         // ─── Raw pipe mode ───────────────────────────────────────────
+        let uc = upstream_control.expect("--upstream is required for raw mode");
+        let ui = upstream_imaging.expect("--upstream is required for raw mode");
         println!("Seestar Proxy (RAW PIPE MODE)");
         println!("=============================");
-        println!("  Upstream:   {} (control), {} (imaging)", upstream_control, upstream_imaging);
-
+        println!("  Upstream:   {} (control), {} (imaging)", uc, ui);
         println!("  Listening:  {} (control), {} (imaging)", bind_control, bind_imaging);
         println!("  Mode:       transparent byte pipe (no parsing, single client)");
         println!();
 
-        let control_handle = tokio::spawn(raw_pipe(bind_control, upstream_control, "control"));
-        let imaging_handle = tokio::spawn(raw_pipe(bind_imaging, upstream_imaging, "imaging"));
+        let control_handle = tokio::spawn(raw_pipe(bind_control, uc, "control"));
+        let imaging_handle = tokio::spawn(raw_pipe(bind_imaging, ui, "imaging"));
 
         tokio::signal::ctrl_c().await?;
         control_handle.abort();
@@ -63,15 +72,18 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Seestar Proxy");
     println!("=============");
-    println!(
-        "  Upstream:   {}:{} (control), {}:{} (imaging)",
-        upstream_ip, config.upstream_control_port,
-        upstream_ip, config.upstream_imaging_port,
-    );
+    if let Some(uc) = upstream_control {
+        println!("  Upstream:   {} (control), {} (imaging)", uc, upstream_imaging.unwrap());
+    } else {
+        println!("  Upstream:   (transparent mode — resolved from first client)");
+    }
     println!(
         "  Listening:  {} (control), {} (imaging)",
         bind_control, bind_imaging
     );
+    if config.transparent {
+        println!("  Mode:       transparent (SO_ORIGINAL_DST)");
+    }
     if config.discovery {
         println!("  Discovery:  bridging on UDP port {}", protocol::DISCOVERY_PORT);
     }
@@ -109,12 +121,18 @@ async fn main() -> anyhow::Result<()> {
             config.wg_key_file.clone()
         };
 
+        let wg_upstream_ip = upstream_control
+            .map(|s| s.ip())
+            .unwrap_or_else(|| {
+                warn!("WireGuard requires --upstream in transparent mode; using localhost as placeholder");
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            });
         match seestar_proxy::wireguard::start(
             config.bind,
             config.wg_port,
             &key_file,
             config.wg_endpoint.clone(),
-            upstream_ip,
+            wg_upstream_ip,
             config.upstream_control_port,
             config.upstream_imaging_port,
             control_inject_tx,
@@ -177,11 +195,12 @@ async fn main() -> anyhow::Result<()> {
     };
     println!();
 
+    let transparent = config.transparent;
     let recorder_c = recorder.clone();
     let metrics_c = proxy_metrics.clone();
     let hooks_c = hook_engine.clone();
     let control_handle = tokio::spawn(async move {
-        if let Err(e) = control::run(bind_control, upstream_control, recorder_c, Some(metrics_c), hooks_c).await {
+        if let Err(e) = control::run(bind_control, upstream_control, transparent, recorder_c, Some(metrics_c), hooks_c).await {
             error!("Control proxy error: {}", e);
         }
     });
@@ -189,14 +208,14 @@ async fn main() -> anyhow::Result<()> {
     let recorder_i = recorder.clone();
     let metrics_i = proxy_metrics.clone();
     let imaging_handle = tokio::spawn(async move {
-        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, recorder_i, Some(metrics_i)).await {
+        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, transparent, recorder_i, Some(metrics_i)).await {
             error!("Imaging proxy error: {}", e);
         }
     });
 
     let discovery_handle = if config.discovery {
         let bind = config.bind;
-        let upstream = upstream_ip;
+        let upstream = upstream_control.map(|s| s.ip());
         let port = config.control_port;
         Some(tokio::spawn(async move {
             if let Err(e) = discovery::run(bind, upstream, port).await {

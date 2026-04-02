@@ -27,12 +27,14 @@ x25519-dalek = { version = "2", optional = true, features = ["static_secrets"] }
 base64 = "0.22"
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 socket2 = { version = "0.6.3", features = ["all"] }
+libc = "0.2"
 
 [features]
 default = ["wireguard", "luajit"]
 luajit = ["mlua/luajit"]
 lua54 = ["mlua/lua54"]
 wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:rand_core"]
+tailscale = []
 
 [dev-dependencies]
 tower = "0.5"

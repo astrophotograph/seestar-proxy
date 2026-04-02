@@ -7,5 +7,9 @@ pub mod imaging;
 pub mod metrics;
 pub mod protocol;
 pub mod recorder;
+#[cfg(unix)]
+pub mod transparent;
 #[cfg(feature = "wireguard")]
 pub mod wireguard;
+#[cfg(feature = "tailscale")]
+pub mod tailscale;

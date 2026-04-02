@@ -54,6 +54,7 @@ DASHBOARD_PORT=4090
 BINARY_PATH="/usr/local/bin/seestar-proxy"
 CONFIG_DIR="/etc/seestar-proxy"
 GITHUB_REPO="astrophotograph/seestar-proxy"
+TRANSPARENT=false
 DRY_RUN=false
 TEARDOWN=false
 PURGE=false
@@ -113,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --upstream-iface)   UPSTREAM_IFACE="$2"; shift 2 ;;
         --dashboard-port)   DASHBOARD_PORT="$2"; shift 2 ;;
         --binary-path)      BINARY_PATH="$2"; shift 2 ;;
+        --transparent)      TRANSPARENT=true; shift ;;
         --dry-run)          DRY_RUN=true; shift ;;
         --teardown)         TEARDOWN=true; shift ;;
         --purge)            PURGE=true; shift ;;
@@ -242,8 +244,8 @@ if [[ $EUID -ne 0 ]] && ! $DRY_RUN; then
     exit 1
 fi
 
-if [[ -z "$SEESTAR_IP" ]]; then
-    error "--seestar-ip is required for setup."
+if [[ -z "$SEESTAR_IP" ]] && ! $TRANSPARENT; then
+    error "--seestar-ip is required for setup (or use --transparent)."
     echo ""
     usage
     exit 1
@@ -500,6 +502,13 @@ EOF
     # NAT: masquerade hotspot traffic going out the upstream interface
     run "iptables -t nat -C POSTROUTING -o ${UPSTREAM_IFACE} -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o ${UPSTREAM_IFACE} -j MASQUERADE"
 
+    # Transparent proxy: redirect Seestar-bound TCP traffic from hotspot clients to the proxy.
+    if $TRANSPARENT; then
+        info "Adding iptables REDIRECT rules for transparent proxying..."
+        run "iptables -t nat -A PREROUTING -i ${HOTSPOT_IFACE} -p tcp --dport 4700 -j REDIRECT --to-port 4700"
+        run "iptables -t nat -A PREROUTING -i ${HOTSPOT_IFACE} -p tcp --dport 4800 -j REDIRECT --to-port 4800"
+    fi
+
     # Persist iptables rules if iptables-persistent is available
     if command -v netfilter-persistent &>/dev/null; then
         run "netfilter-persistent save"
@@ -518,6 +527,17 @@ configure_systemd() {
 
     run "mkdir -p ${CONFIG_DIR}"
 
+    # Build ExecStart arguments.
+    local exec_args="--bind 0.0.0.0 --discovery --dashboard-port ${DASHBOARD_PORT}"
+    if $TRANSPARENT; then
+        exec_args="--transparent ${exec_args}"
+        if [[ -n "$SEESTAR_IP" ]]; then
+            exec_args="--upstream ${SEESTAR_IP} ${exec_args}"
+        fi
+    else
+        exec_args="--upstream ${SEESTAR_IP} ${exec_args}"
+    fi
+
     local service="/etc/systemd/system/seestar-proxy.service"
 
     # If .deb installed the unit to /lib/systemd/system, create an override
@@ -529,11 +549,7 @@ configure_systemd() {
         cat > "$override_dir/hotspot.conf" <<EOF
 [Service]
 ExecStart=
-ExecStart=${BINARY_PATH} \\
-    --upstream ${SEESTAR_IP} \\
-    --bind 0.0.0.0 \\
-    --discovery \\
-    --dashboard-port ${DASHBOARD_PORT}
+ExecStart=${BINARY_PATH} ${exec_args}
 EOF
         echo "  wrote $override_dir/hotspot.conf"
         run "systemctl daemon-reload"
@@ -553,11 +569,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-ExecStart=${BINARY_PATH} \\
-    --upstream ${SEESTAR_IP} \\
-    --bind 0.0.0.0 \\
-    --discovery \\
-    --dashboard-port ${DASHBOARD_PORT}
+ExecStart=${BINARY_PATH} ${exec_args}
 Restart=always
 RestartSec=5
 StandardOutput=journal

@@ -25,6 +25,7 @@ pub struct FileConfig {
     pub discovery: Option<bool>,
     pub record: Option<PathBuf>,
     pub raw: Option<bool>,
+    pub transparent: Option<bool>,
     pub dashboard_port: Option<u16>,
     pub hooks: Option<Vec<PathBuf>>,
     pub wireguard: Option<bool>,
@@ -85,6 +86,16 @@ pub struct Config {
     /// ID remapping. Useful for diagnostics (single client only).
     #[arg(long)]
     pub raw: bool,
+
+    /// Transparent proxy mode — resolve upstream address from iptables REDIRECT
+    /// via SO_ORIGINAL_DST instead of --upstream. Linux only.
+    #[arg(long, env = "SEESTAR_TRANSPARENT")]
+    pub transparent: bool,
+
+    /// Enable embedded Tailscale node (requires tailscale feature)
+    #[cfg(feature = "tailscale")]
+    #[arg(long, env = "SEESTAR_TAILSCALE")]
+    pub tailscale: bool,
 
     /// HTTP dashboard port (0 = disable)
     #[arg(long, default_value = "4090", env = "SEESTAR_DASHBOARD_PORT")]
@@ -216,6 +227,9 @@ impl Config {
         }
         if let Some(true) = file.raw {
             self.raw = true;
+        }
+        if let Some(true) = file.transparent {
+            self.transparent = true;
         }
 
         // Hooks: append file hooks to CLI hooks.

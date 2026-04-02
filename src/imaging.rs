@@ -20,7 +20,8 @@ use tracing::{debug, error, info, warn};
 /// Run the imaging proxy.
 pub async fn run(
     bind_addr: std::net::SocketAddr,
-    upstream_addr: std::net::SocketAddr,
+    upstream_addr: Option<std::net::SocketAddr>,
+    transparent: bool,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
 ) -> anyhow::Result<()> {
@@ -29,12 +30,30 @@ pub async fn run(
 
     let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(32);
 
+    // In transparent mode, the upstream address may not be known yet.
+    let resolved_upstream: Arc<tokio::sync::OnceCell<std::net::SocketAddr>> =
+        Arc::new(tokio::sync::OnceCell::new());
+    if let Some(addr) = upstream_addr {
+        let _ = resolved_upstream.set(addr);
+    }
+
     // Upstream imaging connection with reconnect loop.
     {
         let frame_tx = frame_tx.clone();
         let recorder = recorder.clone();
         let metrics = metrics.clone();
+        let resolved_upstream = resolved_upstream.clone();
         tokio::spawn(async move {
+            // Wait for the upstream address to be resolved (immediate if --upstream is set,
+            // otherwise waits for SO_ORIGINAL_DST from first imaging client).
+            let upstream_addr = loop {
+                if let Some(&addr) = resolved_upstream.get() {
+                    break addr;
+                }
+                info!("Imaging: waiting for upstream address (transparent mode)...");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            };
+
             loop {
                 info!("Connecting to telescope imaging at {}...", upstream_addr);
                 match tokio::time::timeout(
@@ -67,6 +86,16 @@ pub async fn run(
         let (client_stream, client_addr) = listener.accept().await?;
         let _ = client_stream.set_nodelay(true);
         info!("Imaging client connected: {}", client_addr);
+
+        // In transparent mode, resolve upstream from SO_ORIGINAL_DST.
+        #[cfg(unix)]
+        if transparent && resolved_upstream.get().is_none() {
+            use std::os::unix::io::AsRawFd;
+            if let Some(orig) = crate::transparent::get_original_dst(client_stream.as_raw_fd()) {
+                info!("Imaging transparent mode: resolved upstream from SO_ORIGINAL_DST: {}", orig);
+                let _ = resolved_upstream.set(orig);
+            }
+        }
 
         let frame_rx = frame_tx.subscribe();
         let metrics_c = metrics.clone();

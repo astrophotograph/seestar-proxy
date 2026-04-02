@@ -23,11 +23,22 @@ use tracing::{error, info, warn};
 ///    the proxy's bind address.
 pub async fn run(
     bind_addr: IpAddr,
-    upstream_addr: IpAddr,
+    upstream_addr: Option<IpAddr>,
     _proxy_control_port: u16,
 ) -> anyhow::Result<()> {
     // First, discover the upstream Seestar to get its device info.
-    let device_info = probe_upstream(upstream_addr).await?;
+    let device_info = if let Some(addr) = upstream_addr {
+        probe_upstream(addr).await?
+    } else {
+        // Transparent mode without --upstream: use minimal info until a client connects.
+        info!("Discovery: no upstream address, using minimal device info (transparent mode)");
+        serde_json::json!({
+            "result": {
+                "name": "Seestar",
+                "host": {},
+            }
+        })
+    };
     info!(
         "Cached upstream device info: {}",
         serde_json::to_string(&device_info).unwrap_or_default()

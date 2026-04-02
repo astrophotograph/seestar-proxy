@@ -79,7 +79,7 @@ async fn start_triggered_telescope() -> (SocketAddr, oneshot::Sender<Vec<Vec<u8>
 
 async fn start_proxy(telescope_addr: SocketAddr) -> SocketAddr {
     let proxy_addr = free_addr();
-    tokio::spawn(seestar_proxy::imaging::run(proxy_addr, telescope_addr, None, None));
+    tokio::spawn(seestar_proxy::imaging::run(proxy_addr, Some(telescope_addr), false, None, None));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
     proxy_addr
 }
@@ -212,7 +212,8 @@ async fn proxy_records_image_frames() {
     let proxy_addr = free_addr();
     tokio::spawn(seestar_proxy::imaging::run(
         proxy_addr,
-        telescope_addr,
+        Some(telescope_addr),
+        false,
         Some(recorder.clone()),
         None,
     ));
