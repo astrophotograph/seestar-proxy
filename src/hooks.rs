@@ -34,6 +34,9 @@
 use mlua::prelude::*;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -54,14 +57,18 @@ pub struct HookEngine {
     has_on_request: bool,
     has_on_response: bool,
     has_on_event: bool,
+    has_on_upstream_connect: bool,
     has_on_client_connect: bool,
     has_on_client_disconnect: bool,
+    upstream_tx: Arc<StdMutex<Option<mpsc::Sender<String>>>>,
 }
 
 impl HookEngine {
     /// Create a new hook engine and load the given script files.
     pub fn new(script_paths: &[impl AsRef<Path>]) -> anyhow::Result<Self> {
-        let lua = Lua::new();
+        // unsafe_new is required to allow loading C extensions (e.g. lua-openssl) via require().
+        // Safe mode blocks all C modules.
+        let lua = unsafe { Lua::unsafe_new() };
 
         // Create the telescope state table.
         let telescope = lua.create_table()?;
@@ -71,6 +78,29 @@ impl HookEngine {
         telescope.set("view_mode", LuaNil)?;
         telescope.set("battery", 0)?;
         telescope.set("temperature", 0.0)?;
+
+        let upstream_tx_arc: Arc<StdMutex<Option<mpsc::Sender<String>>>> =
+            Arc::new(StdMutex::new(None));
+
+        // telescope.send — inject a message directly into the upstream channel.
+        {
+            let tx_ref = upstream_tx_arc.clone();
+            let send_fn = lua.create_function(move |lua_ctx, msg: LuaValue| {
+                let guard = tx_ref.lock().unwrap();
+                if let Some(tx) = guard.as_ref() {
+                    let value: serde_json::Value = lua_ctx.from_value(msg)?;
+                    let json = serde_json::to_string(&value)
+                        .map_err(|e| mlua::Error::external(format!("JSON error: {e}")))?;
+                    tx.try_send(json)
+                        .map_err(|e| mlua::Error::external(format!("Channel error: {e}")))?;
+                } else {
+                    warn!(target: "hook", "telescope.send called before upstream connected");
+                }
+                Ok(())
+            })?;
+            telescope.set("send", send_fn)?;
+        }
+
         lua.globals().set("telescope", telescope)?;
 
         // Create a `log` function.
@@ -97,6 +127,7 @@ impl HookEngine {
         let has_on_request = globals.get::<LuaFunction>("on_request").is_ok();
         let has_on_response = globals.get::<LuaFunction>("on_response").is_ok();
         let has_on_event = globals.get::<LuaFunction>("on_event").is_ok();
+        let has_on_upstream_connect = globals.get::<LuaFunction>("on_upstream_connect").is_ok();
         let has_on_client_connect = globals.get::<LuaFunction>("on_client_connect").is_ok();
         let has_on_client_disconnect = globals.get::<LuaFunction>("on_client_disconnect").is_ok();
 
@@ -104,9 +135,9 @@ impl HookEngine {
             info!("No hook scripts loaded");
         } else {
             info!(
-                "Hook functions: request={} response={} event={} connect={} disconnect={}",
+                "Hook functions: request={} response={} event={} upstream={} connect={} disconnect={}",
                 has_on_request, has_on_response, has_on_event,
-                has_on_client_connect, has_on_client_disconnect
+                has_on_upstream_connect, has_on_client_connect, has_on_client_disconnect
             );
         }
 
@@ -115,9 +146,29 @@ impl HookEngine {
             has_on_request,
             has_on_response,
             has_on_event,
+            has_on_upstream_connect,
             has_on_client_connect,
             has_on_client_disconnect,
+            upstream_tx: upstream_tx_arc,
         })
+    }
+
+    /// Set the upstream channel sender so Lua scripts can inject messages via `telescope.send`.
+    pub fn set_upstream_tx(&self, tx: mpsc::Sender<String>) {
+        *self.upstream_tx.lock().unwrap() = Some(tx);
+    }
+
+    /// Call on_upstream_connect hook (fired when the upstream TCP connection is established).
+    pub async fn on_upstream_connect(&self, addr: &str) {
+        if !self.has_on_upstream_connect {
+            return;
+        }
+        let lua = self.lua.lock().await;
+        if let Ok(func) = lua.globals().get::<LuaFunction>("on_upstream_connect") {
+            if let Err(e) = func.call::<()>(addr.to_string()) {
+                warn!("on_upstream_connect hook error: {}", e);
+            }
+        }
     }
 
     /// Call on_request hook. Returns the action to take.
@@ -420,5 +471,280 @@ mod tests {
 
         let msg = json!({"id": 1, "method": "test"});
         assert_eq!(engine.on_request(&msg).await, HookAction::Forward);
+    }
+}
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+    use tokio::sync::mpsc;
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn write_script(content: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    /// Load hooks/authenticate.lua and prepend a Lua stub for `_sign_challenge_override`.
+    ///
+    /// `sign_stub` is a Lua expression for the override function body, e.g.:
+    ///   `"function(_k, _c) return \"dGVzdA==\" end"`  — always succeeds
+    ///   `"function(_k, _c) error(\"signing failed\") end"` — always fails
+    fn patched_auth_script(sign_stub: &str) -> NamedTempFile {
+        let script_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("hooks")
+            .join("authenticate.lua");
+        let src = std::fs::read_to_string(&script_path)
+            .unwrap_or_else(|_| panic!("hooks/authenticate.lua not found at {}", script_path.display()));
+        let header = format!("_sign_challenge_override = {}\n", sign_stub);
+        let patched = header + &src;
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(patched.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    const STUB_SIGN_OK: &str = r#"function(_k, _c) return "dGVzdA==" end"#;
+    const STUB_SIGN_FAIL: &str = r#"function(_k, _c) error("signing failed") end"#;
+
+    /// Build a HookEngine from authenticate.lua with a signing stub injected.
+    /// Returns the engine and a receiver that captures telescope.send calls.
+    fn make_engine(sign_stub: &str) -> (HookEngine, mpsc::Receiver<String>) {
+        let script = patched_auth_script(sign_stub);
+        let engine = HookEngine::new(&[script.path()]).unwrap();
+        let (tx, rx) = mpsc::channel(16);
+        engine.set_upstream_tx(tx);
+        (engine, rx)
+    }
+
+    /// Pull all currently buffered messages from the upstream channel.
+    async fn drain(rx: &mut mpsc::Receiver<String>) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        while let Ok(s) = rx.try_recv() {
+            out.push(serde_json::from_str(&s).unwrap());
+        }
+        out
+    }
+
+    // ── telescope.send ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn telescope_send_delivers_to_channel() {
+        let script = write_script(r#"
+            function on_client_connect(addr, port_type)
+                telescope.send({ id = 42, method = "ping", params = "verify" })
+            end
+        "#);
+        let engine = HookEngine::new(&[script.path()]).unwrap();
+        let (tx, mut rx) = mpsc::channel(8);
+        engine.set_upstream_tx(tx);
+
+        engine.on_client_connect("127.0.0.1:1234", "control").await;
+
+        let raw = rx.recv().await.unwrap();
+        let msg: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(msg["id"], 42);
+        assert_eq!(msg["method"], "ping");
+    }
+
+    #[tokio::test]
+    async fn telescope_send_without_upstream_does_not_panic() {
+        // telescope.send before set_upstream_tx is called should warn but not crash.
+        let script = write_script(r#"
+            function on_client_connect(addr, port_type)
+                telescope.send({ id = 1, method = "test", params = "verify" })
+            end
+        "#);
+        let engine = HookEngine::new(&[script.path()]).unwrap();
+        // Deliberately do NOT call set_upstream_tx.
+        engine.on_client_connect("127.0.0.1:1234", "control").await;
+        // No panic — pass.
+    }
+
+    // ── authenticate.lua — happy path ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn auth_connect_sends_get_verify_str() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+
+        let sent = drain(&mut rx).await;
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["id"], 1001);
+        assert_eq!(sent[0]["method"], "get_verify_str");
+    }
+
+    #[tokio::test]
+    async fn auth_does_not_trigger_without_upstream_connect() {
+        let (_engine, mut rx) = make_engine(STUB_SIGN_OK);
+
+        // No on_upstream_connect called — nothing should be sent.
+        assert!(drain(&mut rx).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auth_does_not_re_trigger_if_already_in_progress() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        drain(&mut rx).await; // consume get_verify_str
+
+        // Calling again while auth is in progress must not send another get_verify_str.
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        assert!(drain(&mut rx).await.is_empty(), "must not re-trigger auth");
+    }
+
+    #[tokio::test]
+    async fn auth_full_happy_path() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+
+        // 1. Connect → get_verify_str sent
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        let step1 = drain(&mut rx).await;
+        assert_eq!(step1[0]["method"], "get_verify_str");
+
+        // 2. Challenge arrives → response blocked, verify_client injected
+        let action = engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge-xyz"}}))
+            .await;
+        assert_eq!(action, HookAction::Block);
+        let step2 = drain(&mut rx).await;
+        assert_eq!(step2.len(), 1);
+        assert_eq!(step2[0]["method"], "verify_client");
+        assert!(!step2[0]["params"]["sign"].as_str().unwrap_or("").is_empty(), "sign must be non-empty");
+        assert_eq!(step2[0]["params"]["data"], "challenge-xyz", "data must echo the original challenge");
+
+        // 3. Verify accepted → response blocked, pi_is_verified injected
+        let action = engine
+            .on_response(&json!({"id": 1002, "code": 0}))
+            .await;
+        assert_eq!(action, HookAction::Block);
+        let step3 = drain(&mut rx).await;
+        assert_eq!(step3[0]["method"], "pi_is_verified");
+
+        // 4. Final ack → response blocked, auth done
+        let action = engine
+            .on_response(&json!({"id": 1003, "code": 0}))
+            .await;
+        assert_eq!(action, HookAction::Block);
+        assert!(drain(&mut rx).await.is_empty());
+
+        // 5. Normal requests now forward
+        let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
+        assert_eq!(engine.on_request(&req).await, HookAction::Forward);
+    }
+
+    // ── authenticate.lua — request blocking ───────────────────────────────────
+
+    #[tokio::test]
+    async fn requests_blocked_until_auth_done() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
+
+        // Idle (before first connect): blocked
+        assert_eq!(engine.on_request(&req).await, HookAction::Block);
+
+        // Trigger auth
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        drain(&mut rx).await;
+
+        // waiting_challenge: blocked
+        assert_eq!(engine.on_request(&req).await, HookAction::Block);
+
+        // Advance through all three steps
+        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
+        drain(&mut rx).await;
+        engine.on_response(&json!({"id": 1002, "code": 0})).await;
+        drain(&mut rx).await;
+        engine.on_response(&json!({"id": 1003, "code": 0})).await;
+
+        // done: forwards
+        assert_eq!(engine.on_request(&req).await, HookAction::Forward);
+    }
+
+    #[tokio::test]
+    async fn auth_methods_always_blocked_from_clients() {
+        let (engine, _rx) = make_engine(STUB_SIGN_OK);
+
+        // Complete auth first so state=done, to confirm the block is unconditional.
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
+        engine.on_response(&json!({"id": 1002, "code": 0})).await;
+        engine.on_response(&json!({"id": 1003, "code": 0})).await;
+
+        for method in ["get_verify_str", "verify_client", "pi_is_verified"] {
+            let req = json!({"id": 1, "method": method, "params": "verify"});
+            assert_eq!(
+                engine.on_request(&req).await,
+                HookAction::Block,
+                "{method} must always be blocked from clients"
+            );
+        }
+    }
+
+    // ── authenticate.lua — failure paths ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn auth_fails_gracefully_on_missing_key() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_FAIL);
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        drain(&mut rx).await; // consume get_verify_str
+
+        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge"}})).await;
+
+        // state=failed → requests pass through
+        let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
+        assert_eq!(engine.on_request(&req).await, HookAction::Forward);
+    }
+
+    #[tokio::test]
+    async fn auth_fails_on_empty_challenge() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        drain(&mut rx).await;
+
+        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": ""}})).await;
+
+        let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
+        assert_eq!(engine.on_request(&req).await, HookAction::Forward);
+    }
+
+    #[tokio::test]
+    async fn auth_fails_on_verify_rejection() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        drain(&mut rx).await;
+
+        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge"}})).await;
+        drain(&mut rx).await; // consume verify_client
+
+        engine.on_response(&json!({"id": 1002, "code": -1})).await;
+
+        let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
+        assert_eq!(engine.on_request(&req).await, HookAction::Forward);
+    }
+
+    #[tokio::test]
+    async fn pi_is_verified_nonzero_is_non_fatal() {
+        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        drain(&mut rx).await;
+        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
+        drain(&mut rx).await;
+        engine.on_response(&json!({"id": 1002, "code": 0})).await;
+        drain(&mut rx).await;
+
+        // Non-zero pi_is_verified should still mark auth done.
+        engine.on_response(&json!({"id": 1003, "code": 1})).await;
+
+        let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
+        assert_eq!(engine.on_request(&req).await, HookAction::Forward);
     }
 }

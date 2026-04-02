@@ -41,7 +41,7 @@ end
 
 ### `on_response(msg)`
 
-Called for every JSON-RPC response received from the telescope **before** it is routed back to the originating client. Return semantics are identical to `on_request`.
+Called for JSON-RPC responses received from the telescope that were **not** issued by a connected client (i.e. responses to messages injected via `telescope.send`). Return semantics are identical to `on_request`.
 
 ```lua
 function on_response(msg)
@@ -64,6 +64,22 @@ function on_event(msg)
         return "block"
     end
     return "forward"
+end
+```
+
+---
+
+### `on_upstream_connect(addr)`
+
+Called once when the proxy establishes its TCP connection to the telescope. Fires before any client requests are forwarded. No return value is used.
+
+| Argument | Value |
+|---|---|
+| `addr` | Upstream address as a string, e.g. `"192.168.1.10:4700"` |
+
+```lua
+function on_upstream_connect(addr)
+    log("Connected to telescope at " .. addr)
 end
 ```
 
@@ -98,6 +114,45 @@ end
 
 ---
 
+## C modules via `require`
+
+The proxy uses an embedded LuaJIT runtime. C Lua modules (installed via LuaRocks) can be loaded with `require`, but two things are needed:
+
+**1. Export Lua symbols from the binary**
+
+Add to `.cargo/config.toml` so the dynamic linker can resolve the Lua C API when a `.so` is loaded:
+
+```toml
+# macOS
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-export_dynamic"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-export_dynamic"]
+
+# Linux (glibc)
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-rdynamic"]
+```
+
+**2. Set `LUA_CPATH` at runtime**
+
+LuaRocks installs modules for a specific Lua version. Install against LuaJIT and point the proxy at the resulting `.so` files:
+
+```sh
+# macOS — install
+brew install luajit openssl
+luarocks --lua-dir $(brew --prefix luajit) install <module> ...
+
+# macOS — run
+LUA_CPATH="$(luarocks --lua-dir $(brew --prefix luajit) path --lr-cpath)" \
+  seestar-proxy --hook myscript.lua
+```
+
+> **Note:** `strip = true` in `[profile.release]` strips the dynamic symbol table, breaking C module loading in release builds. Use `strip = "debuginfo"` instead if you need C modules in production.
+
+---
+
 ## Globals
 
 ### `telescope`
@@ -124,6 +179,24 @@ function on_request(msg)
     return "forward"
 end
 ```
+
+### `telescope.send(msg)`
+
+Injects a JSON-RPC message directly into the upstream channel, bypassing the normal client request path (no ID remapping, no pending-map registration). The response will arrive as an `on_response` callback.
+
+Use this to initiate proxy-driven exchanges with the telescope that should be invisible to clients.
+
+```lua
+telescope.send({
+    id     = 1001,
+    method = "get_verify_str",
+    params = "verify",
+})
+```
+
+> **Note:** `telescope.send` is available as soon as the first client connects. Messages sent before the upstream TCP connection is established are buffered in the channel and delivered once the connection is ready.
+
+---
 
 ### `log(message)`
 
