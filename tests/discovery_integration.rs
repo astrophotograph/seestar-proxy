@@ -161,12 +161,9 @@ async fn discovery_bridge_end_to_end() {
 
     let response: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
 
-    // The bridge must replace the telescope's IP with its own bind address.
-    assert_eq!(
-        response["result"]["ip"], "127.0.0.2",
-        "proxy should substitute its own address; got: {response}"
-    );
     // The response must come from the proxy, not from the telescope directly.
+    // The app uses the UDP source IP to determine where to connect, so the
+    // payload "ip" field is not modified — only the source address matters.
     assert_eq!(src.ip().to_string(), "127.0.0.2");
 
     // ── Test 2: non-scan_iscope messages are ignored ───────────────────────────

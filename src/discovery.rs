@@ -74,19 +74,33 @@ pub async fn run(
         info!("Discovery request from {}", src_addr);
 
         // Respond with cached Seestar info.
+        //
         // The app uses the SOURCE IP of the UDP response to determine where
-        // to connect, so we don't need to modify the payload — the response
-        // comes from the proxy's IP automatically.
+        // to connect. We send both a unicast reply (for the normal case) and
+        // a broadcast (for when the proxy and app are on the same machine,
+        // where unicast goes via loopback and the app may not see it —
+        // broadcast always goes through the physical NIC).
         let response_bytes = serde_json::to_vec(&device_info)?;
+
+        // Unicast back to the requester.
         if let Err(e) = socket.send_to(&response_bytes, src_addr).await {
             warn!("Failed to send discovery response to {}: {}", src_addr, e);
-        } else {
-            info!(
-                "Sent discovery response to {} ({} bytes) — app should connect to proxy",
-                src_addr,
-                response_bytes.len()
-            );
         }
+
+        // Also broadcast so same-machine apps see it on the physical interface.
+        let broadcast_dest = SocketAddr::new(
+            IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
+            DISCOVERY_PORT,
+        );
+        if let Err(e) = socket.send_to(&response_bytes, broadcast_dest).await {
+            warn!("Failed to broadcast discovery response: {}", e);
+        }
+
+        info!(
+            "Sent discovery response ({} bytes, unicast to {} + broadcast)",
+            response_bytes.len(),
+            src_addr,
+        );
     }
 }
 
