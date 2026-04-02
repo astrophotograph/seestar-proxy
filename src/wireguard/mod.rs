@@ -47,6 +47,7 @@ pub struct WgInfo {
 /// Returns `WgInfo` for the dashboard, and spawns the packet processing
 /// loop as a background task. Tunnel TCP connections are sent to the
 /// provided injection channels.
+#[allow(clippy::too_many_arguments)]
 pub async fn start(
     bind_addr: std::net::IpAddr,
     port: u16,
@@ -89,7 +90,7 @@ pub async fn start(
         "10.99.0.2/32",
         &server_pub_b64,
         &endpoint_str,
-        &allowed_ips,
+        allowed_ips,
     );
 
     let client_config_svg = qr::config_to_svg(&client_config)
@@ -330,11 +331,8 @@ async fn packet_loop(
                         info!("WireGuard session active — starting periodic discovery announcements");
                     }
                     // Process the packet (handles both handshake and data).
-                    match process_tunn_result(&udp, src, probe_result, &net.inject_tx).await {
-                        TunnAction::Decrypted(pkt) => {
-                            handle_decrypted_packet(&pkt, upstream_ip_bytes, &device_info_json, &mut tunn, &udp, src).await;
-                        }
-                        _ => {}
+                    if let TunnAction::Decrypted(pkt) = process_tunn_result(&udp, src, probe_result, &net.inject_tx).await {
+                        handle_decrypted_packet(&pkt, upstream_ip_bytes, &device_info_json, &mut tunn, &udp, src).await;
                     }
                     continue;
                 }
@@ -369,10 +367,10 @@ async fn packet_loop(
                 if let Some(addr) = peer_addr {
                     let mut dst = vec![0u8; 65536];
                     let result = tunn.encapsulate(&packet, &mut dst);
-                    if let TunnResult::WriteToNetwork(data) = result {
-                        if let Err(e) = udp.send_to(data, addr).await {
-                            warn!("WireGuard send error: {}", e);
-                        }
+                    if let TunnResult::WriteToNetwork(data) = result
+                        && let Err(e) = udp.send_to(data, addr).await
+                    {
+                        warn!("WireGuard send error: {}", e);
                     }
                 }
             }
@@ -388,20 +386,20 @@ async fn packet_loop(
 
             // Periodic discovery announcements while session is active.
             _ = discovery_timer.tick() => {
-                if session_active {
-                    if let Some(addr) = peer_addr {
-                        let discovery_packet = tunnel_discovery::build_discovery_response(
-                            upstream_ip_bytes,
-                            client_ip,
-                            crate::protocol::DISCOVERY_PORT,
-                            device_info_json.as_bytes(),
-                        );
-                        let mut enc = vec![0u8; 65536];
-                        if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&discovery_packet, &mut enc) {
-                            let _ = udp.send_to(data, addr).await;
-                        }
-                        debug!("Sent periodic discovery announcement through tunnel");
+                if session_active
+                    && let Some(addr) = peer_addr
+                {
+                    let discovery_packet = tunnel_discovery::build_discovery_response(
+                        upstream_ip_bytes,
+                        client_ip,
+                        crate::protocol::DISCOVERY_PORT,
+                        device_info_json.as_bytes(),
+                    );
+                    let mut enc = vec![0u8; 65536];
+                    if let TunnResult::WriteToNetwork(data) = tunn.encapsulate(&discovery_packet, &mut enc) {
+                        let _ = udp.send_to(data, addr).await;
                     }
+                    debug!("Sent periodic discovery announcement through tunnel");
                 }
             }
         }

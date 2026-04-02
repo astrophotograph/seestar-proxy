@@ -139,14 +139,13 @@ impl Config {
                 PathBuf::from("/etc/seestar-proxy/config.toml"),
                 dirs_or_home(".config/seestar-proxy/config.toml"),
             ] {
-                if candidate.exists() {
-                    if let Ok(content) = std::fs::read_to_string(candidate) {
-                        if let Ok(file) = toml::from_str::<FileConfig>(&content) {
-                            config.apply_file(file);
-                            info!("Loaded config from {}", candidate.display());
-                            break;
-                        }
-                    }
+                if candidate.exists()
+                    && let Ok(content) = std::fs::read_to_string(candidate)
+                    && let Ok(file) = toml::from_str::<FileConfig>(&content)
+                {
+                    config.apply_file(file);
+                    info!("Loaded config from {}", candidate.display());
+                    break;
                 }
             }
         }
@@ -190,17 +189,19 @@ impl Config {
         apply_default!(wg_port, file.wg_port, 51820);
 
         if let Some(bind) = file.bind {
-            if self.bind == "0.0.0.0".parse::<IpAddr>().unwrap() {
+            let default_bind: IpAddr = [0, 0, 0, 0].into();
+            if self.bind == default_bind {
                 self.bind = bind;
             }
         }
-        if let Some(subnet) = file.wg_subnet {
-            if self.wg_subnet == "10.99.0.0/24" {
-                self.wg_subnet = subnet;
-            }
+        if let Some(subnet) = file.wg_subnet
+            && self.wg_subnet == "10.99.0.0/24"
+        {
+            self.wg_subnet = subnet;
         }
         if let Some(key_file) = file.wg_key_file {
-            if self.wg_key_file == PathBuf::from("~/.seestar-proxy/wg.key") {
+            let default_key: PathBuf = "~/.seestar-proxy/wg.key".into();
+            if self.wg_key_file == default_key {
                 self.wg_key_file = key_file;
             }
         }
@@ -227,10 +228,10 @@ impl Config {
         }
 
         // Verbose: take the higher of CLI and file.
-        if let Some(v) = file.verbose {
-            if v > self.verbose {
-                self.verbose = v;
-            }
+        if let Some(v) = file.verbose
+            && v > self.verbose
+        {
+            self.verbose = v;
         }
     }
 }

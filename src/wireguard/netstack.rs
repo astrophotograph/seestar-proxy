@@ -177,10 +177,8 @@ async fn run_stack(
     );
 
     // Active tunnel connections: maps socket handle to data channels.
-    let mut active_connections: std::collections::HashMap<
-        SocketHandle,
-        (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>),
-    > = std::collections::HashMap::new();
+    type ConnMap = std::collections::HashMap<SocketHandle, (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)>;
+    let mut active_connections: ConnMap = std::collections::HashMap::new();
 
     // Poll loop.
     let mut poll_interval = tokio::time::interval(std::time::Duration::from_millis(10));
@@ -249,10 +247,10 @@ async fn run_stack(
                 }
 
                 // Read data from proxy → write to smoltcp socket.
-                if socket.can_send() {
-                    if let Ok(data) = to_tunnel_rx.try_recv() {
-                        let _ = socket.send_slice(&data);
-                    }
+                if socket.can_send()
+                    && let Ok(data) = to_tunnel_rx.try_recv()
+                {
+                    let _ = socket.send_slice(&data);
                 }
             }
 

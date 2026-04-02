@@ -167,10 +167,10 @@ impl HookEngine {
             return;
         }
         let lua = self.lua.lock().await;
-        if let Ok(func) = lua.globals().get::<LuaFunction>("on_upstream_connect") {
-            if let Err(e) = func.call::<()>(addr.to_string()) {
-                warn!("on_upstream_connect hook error: {}", e);
-            }
+        if let Ok(func) = lua.globals().get::<LuaFunction>("on_upstream_connect")
+            && let Err(e) = func.call::<()>(addr.to_string())
+        {
+            warn!("on_upstream_connect hook error: {}", e);
         }
     }
 
@@ -204,10 +204,10 @@ impl HookEngine {
             return;
         }
         let lua = self.lua.lock().await;
-        if let Ok(func) = lua.globals().get::<LuaFunction>("on_client_connect") {
-            if let Err(e) = func.call::<()>((addr.to_string(), port_type.to_string())) {
-                warn!("on_client_connect hook error: {}", e);
-            }
+        if let Ok(func) = lua.globals().get::<LuaFunction>("on_client_connect")
+            && let Err(e) = func.call::<()>((addr.to_string(), port_type.to_string()))
+        {
+            warn!("on_client_connect hook error: {}", e);
         }
     }
 
@@ -217,10 +217,10 @@ impl HookEngine {
             return;
         }
         let lua = self.lua.lock().await;
-        if let Ok(func) = lua.globals().get::<LuaFunction>("on_client_disconnect") {
-            if let Err(e) = func.call::<()>((addr.to_string(), port_type.to_string())) {
-                warn!("on_client_disconnect hook error: {}", e);
-            }
+        if let Ok(func) = lua.globals().get::<LuaFunction>("on_client_disconnect")
+            && let Err(e) = func.call::<()>((addr.to_string(), port_type.to_string()))
+        {
+            warn!("on_client_disconnect hook error: {}", e);
         }
     }
 

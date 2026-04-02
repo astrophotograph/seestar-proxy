@@ -255,6 +255,7 @@ pub async fn run(
 }
 
 /// Handle a single client connection.
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     stream: TcpStream,
     upstream_tx: mpsc::Sender<String>,
@@ -477,6 +478,7 @@ async fn read_line_limited(
 }
 
 /// Read responses and events from the upstream telescope.
+#[allow(clippy::too_many_arguments)]
 async fn upstream_reader_task(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     state: Arc<Mutex<ControlState>>,
@@ -569,10 +571,10 @@ async fn upstream_reader_task(
             };
 
             // Update telescope state in hook engine for state-aware scripts.
-            if let Some(h) = &hooks {
-                if protocol::is_event(&msg) {
-                    h.update_telescope_state(&msg).await;
-                }
+            if let Some(h) = &hooks
+                && protocol::is_event(&msg)
+            {
+                h.update_telescope_state(&msg).await;
             }
 
             if protocol::is_event(&msg) {
