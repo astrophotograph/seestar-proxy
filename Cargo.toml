@@ -1,6 +1,6 @@
 [package]
 name = "seestar-proxy"
-version = "0.1.0"
+version = "2026.4.0"
 edition = "2024"
 description = "TCP proxy and multiplexer for Seestar smart telescopes"
 license = "GPL-3.0-or-later"
@@ -9,11 +9,12 @@ license = "GPL-3.0-or-later"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = "0.4"
 anyhow = "1"
+toml = "0.8"
 axum = "0.7"
 futures-util = "0.3"
 mlua = { version = "0.10", features = ["luajit", "vendored", "async", "send", "serialize"] }

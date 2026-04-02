@@ -1,7 +1,39 @@
-//! CLI configuration.
+//! CLI and config file configuration.
+//!
+//! Precedence (highest to lowest):
+//!   1. CLI flags
+//!   2. Config file (TOML, via `--config`)
+//!   3. Environment variables (`SEESTAR_*`)
+//!   4. Built-in defaults
 
 use clap::Parser;
+use serde::Deserialize;
 use std::net::IpAddr;
+use std::path::PathBuf;
+use tracing::info;
+
+/// TOML config file structure. All fields optional — only set fields override defaults.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct FileConfig {
+    pub upstream: Option<String>,
+    pub upstream_control_port: Option<u16>,
+    pub upstream_imaging_port: Option<u16>,
+    pub bind: Option<IpAddr>,
+    pub control_port: Option<u16>,
+    pub imaging_port: Option<u16>,
+    pub discovery: Option<bool>,
+    pub record: Option<PathBuf>,
+    pub raw: Option<bool>,
+    pub dashboard_port: Option<u16>,
+    pub hooks: Option<Vec<PathBuf>>,
+    pub wireguard: Option<bool>,
+    pub wg_port: Option<u16>,
+    pub wg_subnet: Option<String>,
+    pub wg_key_file: Option<PathBuf>,
+    pub wg_endpoint: Option<String>,
+    pub verbose: Option<u8>,
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -13,37 +45,41 @@ use std::net::IpAddr;
                   bridges UDP discovery broadcasts."
 )]
 pub struct Config {
+    /// Path to TOML config file
+    #[arg(long, short = 'c', env = "SEESTAR_CONFIG")]
+    pub config: Option<PathBuf>,
+
     /// Seestar telescope IP address or hostname (default: resolves seestar.local)
-    #[arg(long, short = 'u')]
+    #[arg(long, short = 'u', env = "SEESTAR_UPSTREAM")]
     pub upstream: Option<String>,
 
     /// Seestar control port
-    #[arg(long, default_value = "4700")]
+    #[arg(long, default_value = "4700", env = "SEESTAR_UPSTREAM_CONTROL_PORT")]
     pub upstream_control_port: u16,
 
     /// Seestar imaging port
-    #[arg(long, default_value = "4800")]
+    #[arg(long, default_value = "4800", env = "SEESTAR_UPSTREAM_IMAGING_PORT")]
     pub upstream_imaging_port: u16,
 
     /// Address to bind the proxy on
-    #[arg(long, short, default_value = "0.0.0.0")]
+    #[arg(long, short, default_value = "0.0.0.0", env = "SEESTAR_BIND")]
     pub bind: IpAddr,
 
     /// Local control port to listen on
-    #[arg(long, default_value = "4700")]
+    #[arg(long, default_value = "4700", env = "SEESTAR_CONTROL_PORT")]
     pub control_port: u16,
 
     /// Local imaging port to listen on
-    #[arg(long, default_value = "4800")]
+    #[arg(long, default_value = "4800", env = "SEESTAR_IMAGING_PORT")]
     pub imaging_port: u16,
 
     /// Enable discovery bridging (respond to UDP broadcasts on port 4720)
-    #[arg(long, short)]
+    #[arg(long, short, env = "SEESTAR_DISCOVERY")]
     pub discovery: bool,
 
     /// Record traffic to a session directory (for mock telescope testing)
-    #[arg(long, short)]
-    pub record: Option<std::path::PathBuf>,
+    #[arg(long, short, env = "SEESTAR_RECORD")]
+    pub record: Option<PathBuf>,
 
     /// Raw pipe mode — forward bytes transparently without JSON parsing or
     /// ID remapping. Useful for diagnostics (single client only).
@@ -51,35 +87,159 @@ pub struct Config {
     pub raw: bool,
 
     /// HTTP dashboard port (0 = disable)
-    #[arg(long, default_value = "4090")]
+    #[arg(long, default_value = "4090", env = "SEESTAR_DASHBOARD_PORT")]
     pub dashboard_port: u16,
 
     /// Lua hook script (can be specified multiple times)
     #[arg(long = "hook")]
-    pub hooks: Vec<std::path::PathBuf>,
+    pub hooks: Vec<PathBuf>,
 
     /// Enable WireGuard tunnel endpoint for cross-subnet access
-    #[arg(long)]
+    #[arg(long, env = "SEESTAR_WIREGUARD")]
     pub wireguard: bool,
 
     /// WireGuard UDP listen port
-    #[arg(long, default_value = "51820")]
+    #[arg(long, default_value = "51820", env = "SEESTAR_WG_PORT")]
     pub wg_port: u16,
 
     /// WireGuard tunnel subnet (server gets .1, first client gets .2)
-    #[arg(long, default_value = "10.99.0.0/24")]
+    #[arg(long, default_value = "10.99.0.0/24", env = "SEESTAR_WG_SUBNET")]
     pub wg_subnet: String,
 
     /// WireGuard key file path
-    #[arg(long, default_value = "~/.seestar-proxy/wg.key")]
-    pub wg_key_file: std::path::PathBuf,
+    #[arg(long, default_value = "~/.seestar-proxy/wg.key", env = "SEESTAR_WG_KEY_FILE")]
+    pub wg_key_file: PathBuf,
 
     /// External endpoint for WireGuard client config (e.g., mypi.duckdns.org:51820).
     /// Auto-detected if not specified.
-    #[arg(long)]
+    #[arg(long, env = "SEESTAR_WG_ENDPOINT")]
     pub wg_endpoint: Option<String>,
 
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]
     pub verbose: u8,
+}
+
+impl Config {
+    /// Parse CLI args, then layer config file values underneath for any
+    /// fields that weren't explicitly set on the command line.
+    pub fn load() -> anyhow::Result<Self> {
+        let mut config = Config::parse();
+
+        if let Some(path) = config.config.clone() {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
+            let file: FileConfig = toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?;
+            config.apply_file(file);
+            info!("Loaded config from {}", path.display());
+        } else {
+            // Try default locations.
+            for candidate in &[
+                PathBuf::from("/etc/seestar-proxy/config.toml"),
+                dirs_or_home(".config/seestar-proxy/config.toml"),
+            ] {
+                if candidate.exists() {
+                    if let Ok(content) = std::fs::read_to_string(candidate) {
+                        if let Ok(file) = toml::from_str::<FileConfig>(&content) {
+                            config.apply_file(file);
+                            info!("Loaded config from {}", candidate.display());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Apply file config values as defaults — only fills in fields that
+    /// still have their built-in default (i.e. weren't set by CLI or env).
+    fn apply_file(&mut self, file: FileConfig) {
+        // For Option fields, only fill if CLI left them as None.
+        if self.upstream.is_none() {
+            self.upstream = file.upstream;
+        }
+        if self.wg_endpoint.is_none() {
+            self.wg_endpoint = file.wg_endpoint;
+        }
+        if self.record.is_none() {
+            self.record = file.record;
+        }
+
+        // For fields with defaults, we can't perfectly distinguish "user passed
+        // the default value" from "wasn't set", but file config values for these
+        // are useful mainly when CLI isn't used at all (e.g. systemd service).
+        // The env var layer (clap `env`) handles the middle ground.
+        macro_rules! apply_default {
+            ($field:ident, $file_field:expr, $default:expr) => {
+                if let Some(v) = $file_field {
+                    if self.$field == $default {
+                        self.$field = v;
+                    }
+                }
+            };
+        }
+
+        apply_default!(upstream_control_port, file.upstream_control_port, 4700);
+        apply_default!(upstream_imaging_port, file.upstream_imaging_port, 4800);
+        apply_default!(control_port, file.control_port, 4700);
+        apply_default!(imaging_port, file.imaging_port, 4800);
+        apply_default!(dashboard_port, file.dashboard_port, 4090);
+        apply_default!(wg_port, file.wg_port, 51820);
+
+        if let Some(bind) = file.bind {
+            if self.bind == "0.0.0.0".parse::<IpAddr>().unwrap() {
+                self.bind = bind;
+            }
+        }
+        if let Some(subnet) = file.wg_subnet {
+            if self.wg_subnet == "10.99.0.0/24" {
+                self.wg_subnet = subnet;
+            }
+        }
+        if let Some(key_file) = file.wg_key_file {
+            if self.wg_key_file == PathBuf::from("~/.seestar-proxy/wg.key") {
+                self.wg_key_file = key_file;
+            }
+        }
+
+        // Bool flags: file can enable them (CLI --flag always wins since it
+        // can only set true, never explicitly set false).
+        if let Some(true) = file.discovery {
+            self.discovery = true;
+        }
+        if let Some(true) = file.wireguard {
+            self.wireguard = true;
+        }
+        if let Some(true) = file.raw {
+            self.raw = true;
+        }
+
+        // Hooks: append file hooks to CLI hooks.
+        if let Some(file_hooks) = file.hooks {
+            for h in file_hooks {
+                if !self.hooks.contains(&h) {
+                    self.hooks.push(h);
+                }
+            }
+        }
+
+        // Verbose: take the higher of CLI and file.
+        if let Some(v) = file.verbose {
+            if v > self.verbose {
+                self.verbose = v;
+            }
+        }
+    }
+}
+
+/// Build a path under $HOME, falling back to a reasonable default.
+fn dirs_or_home(relative: &str) -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(relative)
+    } else {
+        PathBuf::from("/tmp").join(relative)
+    }
 }

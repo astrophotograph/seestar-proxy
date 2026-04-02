@@ -1,0 +1,23 @@
+[Unit]
+Description=Seestar Telescope Proxy
+Documentation=https://github.com/astrophotograph/seestar-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/seestar-proxy --config /etc/seestar-proxy/config.toml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=seestar-proxy
+
+# Hardening
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/seestar-proxy
+
+[Install]
+WantedBy=multi-user.target

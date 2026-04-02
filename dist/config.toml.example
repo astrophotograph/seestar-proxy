@@ -1,0 +1,57 @@
+# Seestar Proxy configuration
+#
+# Place this file at /etc/seestar-proxy/config.toml
+# or ~/.config/seestar-proxy/config.toml
+#
+# CLI flags and environment variables (SEESTAR_*) take precedence
+# over values in this file.
+
+# Seestar telescope IP address or hostname.
+# upstream = "seestar.local"
+
+# Seestar telescope ports (rarely need changing).
+# upstream_control_port = 4700
+# upstream_imaging_port = 4800
+
+# Address to bind the proxy on.
+# bind = "0.0.0.0"
+
+# Local ports to listen on.
+# control_port = 4700
+# imaging_port = 4800
+
+# Enable UDP discovery bridging (port 4720).
+# When true, apps auto-discover the proxy as if it were the telescope.
+# discovery = true
+
+# Web dashboard port (0 to disable).
+# dashboard_port = 4090
+
+# Lua hook scripts to load. Can list multiple.
+# hooks = ["/etc/seestar-proxy/hooks/authenticate.lua"]
+
+# Record traffic to a session directory.
+# record = "/var/lib/seestar-proxy/sessions"
+
+# --- WireGuard tunnel ---
+
+# Enable embedded WireGuard VPN endpoint.
+# wireguard = false
+
+# WireGuard UDP listen port.
+# wg_port = 51820
+
+# WireGuard tunnel subnet.
+# wg_subnet = "10.99.0.0/24"
+
+# WireGuard key file path.
+# wg_key_file = "/var/lib/seestar-proxy/wg.key"
+
+# External endpoint for WireGuard client config.
+# Auto-detected if not set.
+# wg_endpoint = "mypi.duckdns.org:51820"
+
+# --- Logging ---
+
+# Verbosity level: 0 = info, 1 = debug, 2 = trace
+# verbose = 0

@@ -1,0 +1,188 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (CalVer, e.g. 2026.4.0). Leave empty to auto-increment."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  determine-version:
+    name: Determine Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calculate version
+        id: version
+        run: |
+          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
+          echo "Current version: $CURRENT"
+
+          if [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+          else
+            IFS='.' read -r CUR_YEAR CUR_MONTH CUR_MICRO <<< "$CURRENT"
+            NOW_YEAR=$(date +%Y)
+            NOW_MONTH=$(date +%-m)
+
+            if [[ "$CUR_YEAR" == "$NOW_YEAR" && "$CUR_MONTH" == "$NOW_MONTH" ]]; then
+              NEW_MICRO=$((CUR_MICRO + 1))
+              VERSION="${NOW_YEAR}.${NOW_MONTH}.${NEW_MICRO}"
+            else
+              VERSION="${NOW_YEAR}.${NOW_MONTH}.0"
+            fi
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release version: $VERSION"
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: determine-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: armv7-unknown-linux-musleabihf
+            os: ubuntu-latest
+            use_cross: true
+            deb_arch: armhf
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: true
+            deb_arch: arm64
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use_cross: false
+            deb_arch: amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_cross: false
+            deb_arch: ""
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update version in Cargo.toml
+        run: |
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          rm -f Cargo.toml.bak
+          echo "Updated Cargo.toml to version $VERSION"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          SRC="target/${{ matrix.target }}/release/seestar-proxy"
+          DEST="seestar-proxy-${{ matrix.target }}"
+          cp "$SRC" "$DEST"
+          echo "Binary size: $(du -h "$DEST" | cut -f1)"
+
+      - name: Build .deb package
+        if: matrix.deb_arch != ''
+        run: |
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          ARCH="${{ matrix.deb_arch }}"
+          PKG="seestar-proxy_${VERSION}_${ARCH}"
+          mkdir -p "${PKG}/DEBIAN"
+          mkdir -p "${PKG}/usr/bin"
+          mkdir -p "${PKG}/lib/systemd/system"
+          mkdir -p "${PKG}/etc/seestar-proxy"
+
+          cp "seestar-proxy-${{ matrix.target }}" "${PKG}/usr/bin/seestar-proxy"
+          chmod 755 "${PKG}/usr/bin/seestar-proxy"
+          cp dist/seestar-proxy.service "${PKG}/lib/systemd/system/"
+          cp dist/config.toml.example "${PKG}/etc/seestar-proxy/"
+
+          cat > "${PKG}/DEBIAN/control" <<EOF
+          Package: seestar-proxy
+          Version: ${VERSION}
+          Architecture: ${ARCH}
+          Maintainer: astrophotograph <astrophotograph@users.noreply.github.com>
+          Description: TCP proxy and multiplexer for Seestar smart telescopes
+           Proxies and multiplexes connections between multiple clients and a
+           single Seestar telescope. Includes discovery bridging, WireGuard
+           tunnel support, web dashboard, and Lua scripting.
+          Homepage: https://github.com/astrophotograph/seestar-proxy
+          License: GPL-3.0-or-later
+          Section: net
+          Priority: optional
+          EOF
+
+          # Remove leading whitespace from heredoc (YAML indent)
+          sed -i 's/^          //' "${PKG}/DEBIAN/control"
+
+          dpkg-deb --build --root-owner-group "${PKG}"
+          echo "Built: ${PKG}.deb ($(du -h "${PKG}.deb" | cut -f1))"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: seestar-proxy-${{ matrix.target }}
+          path: |
+            seestar-proxy-${{ matrix.target }}
+            *.deb
+
+  publish-release:
+    name: Publish Release
+    needs: [determine-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir release
+          for dir in artifacts/seestar-proxy-*/; do
+            cp "$dir"/* release/
+          done
+          chmod +x release/seestar-proxy-*
+          ls -lh release/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            release/*

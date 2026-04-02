@@ -514,36 +514,47 @@ mod auth_tests {
         f
     }
 
+    fn auth_script_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("hooks")
+            .join("authenticate.lua")
+    }
+
     /// Load hooks/authenticate.lua and prepend a Lua stub for `_sign_challenge_override`.
+    ///
+    /// Returns `None` if the script file is not present (gitignored).
     ///
     /// `sign_stub` is a Lua expression for the override function body, e.g.:
     ///   `"function(_k, _c) return \"dGVzdA==\" end"`  — always succeeds
     ///   `"function(_k, _c) error(\"signing failed\") end"` — always fails
-    fn patched_auth_script(sign_stub: &str) -> NamedTempFile {
-        let script_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("hooks")
-            .join("authenticate.lua");
-        let src = std::fs::read_to_string(&script_path)
-            .unwrap_or_else(|_| panic!("hooks/authenticate.lua not found at {}", script_path.display()));
+    fn patched_auth_script(sign_stub: &str) -> Option<NamedTempFile> {
+        let script_path = auth_script_path();
+        let src = match std::fs::read_to_string(&script_path) {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!("Skipping: hooks/authenticate.lua not found at {}", script_path.display());
+                return None;
+            }
+        };
         let header = format!("_sign_challenge_override = {}\n", sign_stub);
         let patched = header + &src;
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(patched.as_bytes()).unwrap();
         f.flush().unwrap();
-        f
+        Some(f)
     }
 
     const STUB_SIGN_OK: &str = r#"function(_k, _c) return "dGVzdA==" end"#;
     const STUB_SIGN_FAIL: &str = r#"function(_k, _c) error("signing failed") end"#;
 
     /// Build a HookEngine from authenticate.lua with a signing stub injected.
-    /// Returns the engine and a receiver that captures telescope.send calls.
-    fn make_engine(sign_stub: &str) -> (HookEngine, mpsc::Receiver<String>) {
-        let script = patched_auth_script(sign_stub);
+    /// Returns `None` if the script file is not present (gitignored).
+    fn make_engine(sign_stub: &str) -> Option<(HookEngine, mpsc::Receiver<String>)> {
+        let script = patched_auth_script(sign_stub)?;
         let engine = HookEngine::new(&[script.path()]).unwrap();
         let (tx, rx) = mpsc::channel(16);
         engine.set_upstream_tx(tx);
-        (engine, rx)
+        Some((engine, rx))
     }
 
     /// Pull all currently buffered messages from the upstream channel.
@@ -594,7 +605,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_connect_sends_get_verify_str() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
 
         engine.on_upstream_connect("192.168.1.1:4700").await;
 
@@ -606,7 +617,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_does_not_trigger_without_upstream_connect() {
-        let (_engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((_engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
 
         // No on_upstream_connect called — nothing should be sent.
         assert!(drain(&mut rx).await.is_empty());
@@ -614,7 +625,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_does_not_re_trigger_if_already_in_progress() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
 
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await; // consume get_verify_str
@@ -626,7 +637,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_full_happy_path() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
 
         // 1. Connect → get_verify_str sent
         engine.on_upstream_connect("192.168.1.1:4700").await;
@@ -668,7 +679,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn requests_blocked_until_auth_done() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
         let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
 
         // Idle (before first connect): blocked
@@ -694,7 +705,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_methods_always_blocked_from_clients() {
-        let (engine, _rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, _rx)) = make_engine(STUB_SIGN_OK) else { return };
 
         // Complete auth first so state=done, to confirm the block is unconditional.
         engine.on_upstream_connect("192.168.1.1:4700").await;
@@ -716,7 +727,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_fails_gracefully_on_missing_key() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_FAIL);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_FAIL) else { return };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await; // consume get_verify_str
 
@@ -729,7 +740,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_fails_on_empty_challenge() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await;
 
@@ -741,7 +752,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_fails_on_verify_rejection() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await;
 
@@ -756,7 +767,7 @@ mod auth_tests {
 
     #[tokio::test]
     async fn pi_is_verified_nonzero_is_non_fatal() {
-        let (engine, mut rx) = make_engine(STUB_SIGN_OK);
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await;
         engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;

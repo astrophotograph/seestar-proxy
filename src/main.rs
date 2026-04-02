@@ -1,4 +1,3 @@
-use clap::Parser;
 use seestar_proxy::{control, dashboard, discovery, hooks, imaging, metrics, protocol};
 use seestar_proxy::config::Config;
 use seestar_proxy::recorder::Recorder;
@@ -10,7 +9,7 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let config = Config::parse();
+    let config = Config::load()?;
 
     // Set up logging.
     let log_level = match config.verbose {
