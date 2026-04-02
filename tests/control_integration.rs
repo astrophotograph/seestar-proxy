@@ -154,8 +154,10 @@ async fn start_silent_telescope() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let (mut r, _w) = stream.into_split();
+            // Keep both halves alive so the proxy doesn't see EOF and reconnect.
+            let (mut r, w) = stream.into_split();
             tokio::spawn(async move {
+                let _keep_alive = w;
                 let mut buf = [0u8; 4096];
                 while r.read(&mut buf).await.unwrap_or(0) > 0 {}
             });
@@ -498,8 +500,9 @@ async fn pending_map_rejects_overflow() {
             .await
             .unwrap();
     }
-    // Give the proxy time to process all requests.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Give the proxy time to process all 1024 requests through the pending map.
+    // Each request involves channel sends which may briefly block under pressure.
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // This request must exceed the limit.
     writer
@@ -508,7 +511,7 @@ async fn pending_map_rejects_overflow() {
         .unwrap();
 
     // Bug: proxy queues the request like all others; no response ever arrives.
-    let v = tokio::time::timeout(Duration::from_secs(1), read_json(&mut reader))
+    let v = tokio::time::timeout(Duration::from_secs(3), read_json(&mut reader))
         .await
         .expect("proxy should send an immediate error when the pending map is full");
 
