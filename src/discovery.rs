@@ -56,12 +56,28 @@ pub async fn run(
     //
     // When bind_addr is unspecified, the send and recv sockets are equivalent,
     // so we just reuse the recv socket for sending.
+    // Bind the send socket to port 4720 (not ephemeral) because the Seestar
+    // app filters discovery responses by source port. Use SO_REUSEPORT since
+    // the recv socket already holds 0.0.0.0:4720.
     let send_socket = if bind_addr.is_unspecified() || bind_addr == recv_bind_ip {
         None
     } else {
-        let sock = UdpSocket::bind(SocketAddr::new(bind_addr, 0)).await?;
-        sock.set_broadcast(true)?;
-        Some(sock)
+        let send_addr = SocketAddr::new(bind_addr, DISCOVERY_PORT);
+        let std_sock = {
+            let sock = socket2::Socket::new(
+                socket2::Domain::IPV4,
+                socket2::Type::DGRAM,
+                Some(socket2::Protocol::UDP),
+            )?;
+            sock.set_reuse_address(true)?;
+            #[cfg(not(windows))]
+            sock.set_reuse_port(true)?;
+            sock.set_nonblocking(true)?;
+            sock.set_broadcast(true)?;
+            sock.bind(&send_addr.into())?;
+            sock
+        };
+        Some(UdpSocket::from_std(std_sock.into())?)
     };
 
     info!(
