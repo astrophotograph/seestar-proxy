@@ -55,18 +55,22 @@ jobs:
             os: ubuntu-latest
             use_cross: true
             deb_arch: armhf
+            features: "--no-default-features --features wireguard,lua54"
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
             deb_arch: arm64
+            features: "--no-default-features --features wireguard,lua54"
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: false
             deb_arch: amd64
+            features: "--no-default-features --features wireguard,lua54"
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
             deb_arch: ""
+            features: ""
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -93,7 +97,7 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
@@ -101,7 +105,7 @@ jobs:
 
       - name: Build (native)
         if: "!matrix.use_cross"
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
 
       - name: Rename binary
         shell: bash
