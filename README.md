@@ -41,7 +41,29 @@ Run it:
 ./seestar-proxy --upstream 192.168.42.41 --discovery
 ```
 
-Open your Seestar app — it should discover the proxy automatically. The web dashboard is at `http://localhost:4090/`.
+The web dashboard is at `http://localhost:4090/`.
+
+## First-Time App Setup
+
+The Seestar app remembers the IP address it first connects to and reuses it in future sessions. To redirect the app through the proxy, it must connect to the proxy's IP **before** it ever connects directly to the scope. Follow this order:
+
+1. **Turn the scope OFF** — if the scope is reachable, the app may connect directly and skip the proxy.
+2. **Start the proxy** — with `--discovery` enabled so the app finds the proxy via UDP broadcast.
+3. **Open the Seestar app** — it will discover the proxy (instead of the scope) and connect to the proxy's IP.
+4. **Turn the scope ON** — the proxy detects it coming online and establishes the upstream connection automatically.
+
+Once the app has connected through the proxy at least once, it remembers the proxy's IP and reconnects automatically on subsequent launches — no special startup order needed after that.
+
+### Troubleshooting
+
+**App connects directly to the scope instead of the proxy**
+The app has the telescope's IP cached. Power off the scope, clear the app's device history (or reinstall), then follow the startup order above.
+
+**App does not discover the proxy**
+Confirm `--discovery` is passed and that the proxy's `--bind` IP is on the same subnet as the app's device. Check that UDP port 4720 is not blocked by a firewall on the proxy host.
+
+**App connects to proxy but imaging/control don't work**
+The scope may not be on yet. Turn it on — the proxy reconnects upstream automatically within a few seconds.
 
 ## Raspberry Pi Hotspot
 
