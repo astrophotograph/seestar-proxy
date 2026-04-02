@@ -68,6 +68,12 @@ pub async fn run(
     let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
     let upstream_started = Arc::new(Notify::new());
 
+    // Give hook scripts access to the upstream channel immediately so they
+    // can inject auth messages (e.g. authenticate.lua) when the first client connects.
+    if let Some(h) = &hooks {
+        h.set_upstream_tx(upstream_tx.clone());
+    }
+
     // Spawn the upstream connection task (waits for first client).
     {
         let upstream_started = upstream_started.clone();
@@ -103,6 +109,9 @@ pub async fn run(
             };
             let _ = upstream.set_nodelay(true);
             info!("Connected to telescope control at {}", upstream_addr);
+            if let Some(h) = &hooks_up {
+                h.on_upstream_connect(&upstream_addr.to_string()).await;
+            }
 
             let (upstream_reader, mut upstream_writer) = upstream.into_split();
 
@@ -582,8 +591,19 @@ async fn upstream_reader_task(
                         warn!("Client channel full/closed for id {:?}", pending.original_id);
                     }
                 } else {
-                    debug!("Response for untracked id {}, broadcasting", remapped_id);
-                    let _ = event_tx.send(trimmed);
+                    debug!("Response for untracked id {}, routing via on_response hook", remapped_id);
+                    let should_broadcast = if let Some(h) = &hooks {
+                        match h.on_response(&msg).await {
+                            HookAction::Forward => true,
+                            HookAction::Block => false,
+                            HookAction::Modify(_) => true,
+                        }
+                    } else {
+                        true
+                    };
+                    if should_broadcast {
+                        let _ = event_tx.send(trimmed);
+                    }
                 }
             } else {
                 debug!("Unknown message type, broadcasting");
