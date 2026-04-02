@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Run the imaging proxy.
 pub async fn run(
@@ -28,39 +28,45 @@ pub async fn run(
     info!("Imaging proxy listening on {}", bind_addr);
 
     let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(32);
-    let upstream_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // Accept client connections. Upstream connects lazily on first client.
+    // Upstream imaging connection with reconnect loop.
+    {
+        let frame_tx = frame_tx.clone();
+        let recorder = recorder.clone();
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            loop {
+                info!("Connecting to telescope imaging at {}...", upstream_addr);
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(10),
+                    TcpStream::connect(upstream_addr),
+                )
+                .await
+                {
+                    Ok(Ok(upstream)) => {
+                        let _ = upstream.set_nodelay(true);
+                        info!("Connected to telescope imaging at {}", upstream_addr);
+                        let (upstream_reader, upstream_writer) = upstream.into_split();
+                        // Run reader and heartbeat concurrently; reconnect when either stops.
+                        tokio::select! {
+                            _ = upstream_reader_task(upstream_reader, frame_tx.clone(), recorder.clone(), metrics.clone()) => {}
+                            _ = imaging_heartbeat_task(upstream_writer) => {}
+                        }
+                        warn!("Telescope imaging connection lost");
+                    }
+                    Ok(Err(e)) => error!("Failed to connect to telescope imaging: {}", e),
+                    Err(_) => error!("Timed out connecting to telescope imaging at {}", upstream_addr),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    // Accept client connections.
     loop {
         let (client_stream, client_addr) = listener.accept().await?;
         let _ = client_stream.set_nodelay(true);
         info!("Imaging client connected: {}", client_addr);
-
-        // Connect upstream on first imaging client.
-        if !upstream_started.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            info!("First imaging client — connecting to telescope at {}...", upstream_addr);
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(10),
-                TcpStream::connect(upstream_addr),
-            )
-            .await
-            {
-                Ok(Ok(upstream)) => {
-                    let _ = upstream.set_nodelay(true);
-                    info!("Connected to telescope imaging at {}", upstream_addr);
-                    let (upstream_reader, upstream_writer) = upstream.into_split();
-                    let frame_tx_r = frame_tx.clone();
-                    tokio::spawn(upstream_reader_task(upstream_reader, frame_tx_r, recorder.clone(), metrics.clone()));
-                    tokio::spawn(imaging_heartbeat_task(upstream_writer));
-                }
-                Ok(Err(e)) => {
-                    error!("Failed to connect to telescope imaging: {}", e);
-                }
-                Err(_) => {
-                    error!("Timed out connecting to telescope imaging at {}", upstream_addr);
-                }
-            }
-        }
 
         let frame_rx = frame_tx.subscribe();
         let metrics_c = metrics.clone();
