@@ -49,7 +49,9 @@ async fn start_mock_telescope(response_ip: &'static str) -> Option<()> {
 
     tokio::spawn(async move {
         let mut buf = [0u8; 4096];
-        let Ok((n, src)) = sock.recv_from(&mut buf).await else { return };
+        let Ok((n, src)) = sock.recv_from(&mut buf).await else {
+            return;
+        };
 
         // Respond only to scan_iscope probes.
         if let Ok(req) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) {
@@ -106,7 +108,11 @@ async fn discovery_bridge_end_to_end() {
     // Start the discovery bridge on 127.0.0.2:4720.
     let bind_addr: IpAddr = "127.0.0.2".parse().unwrap();
     let upstream_addr: IpAddr = "127.0.0.1".parse().unwrap();
-    tokio::spawn(seestar_proxy::discovery::run(bind_addr, Some(upstream_addr), 4700));
+    tokio::spawn(seestar_proxy::discovery::run(
+        bind_addr,
+        upstream_addr,
+        4700,
+    ));
 
     // Wait for the bridge to complete its startup probe and bind its port.
     // probe_upstream has a 5 s internal timeout; with a live mock it completes
@@ -151,13 +157,10 @@ async fn discovery_bridge_end_to_end() {
         .unwrap();
 
     let mut buf = [0u8; 4096];
-    let (n, src) = tokio::time::timeout(
-        Duration::from_secs(2),
-        client.recv_from(&mut buf),
-    )
-    .await
-    .expect("timed out waiting for discovery response")
-    .unwrap();
+    let (n, src) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("timed out waiting for discovery response")
+        .unwrap();
 
     let response: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
 
@@ -178,11 +181,8 @@ async fn discovery_bridge_end_to_end() {
         .await
         .unwrap();
 
-    let silence = tokio::time::timeout(
-        Duration::from_millis(200),
-        client.recv_from(&mut buf),
-    )
-    .await;
+    let silence =
+        tokio::time::timeout(Duration::from_millis(200), client.recv_from(&mut buf)).await;
     assert!(
         silence.is_err(),
         "bridge must not respond to non-scan_iscope requests"
@@ -209,8 +209,11 @@ async fn discovery_probe_timeout_returns_error() {
     let bind_addr: IpAddr = "127.0.0.3".parse().unwrap();
     let upstream_addr: IpAddr = "127.0.0.4".parse().unwrap(); // nothing on :4720
 
-    let handle =
-        tokio::spawn(seestar_proxy::discovery::run(bind_addr, Some(upstream_addr), 4700));
+    let handle = tokio::spawn(seestar_proxy::discovery::run(
+        bind_addr,
+        upstream_addr,
+        4700,
+    ));
 
     // probe_upstream gives a minimal fallback after a 5 s timeout, so run()
     // won't fail — it will proceed with minimal info.  We verify it starts
@@ -247,7 +250,11 @@ async fn discovery_unspecified_bind_omits_ip_substitution() {
 
     let bind_addr: IpAddr = "0.0.0.0".parse().unwrap();
     let upstream_addr: IpAddr = "127.0.0.1".parse().unwrap();
-    tokio::spawn(seestar_proxy::discovery::run(bind_addr, Some(upstream_addr), 4700));
+    tokio::spawn(seestar_proxy::discovery::run(
+        bind_addr,
+        upstream_addr,
+        4700,
+    ));
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 

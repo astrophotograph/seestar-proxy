@@ -14,10 +14,7 @@ use tracing::{debug, error, info};
 ///
 /// Connects to `127.0.0.1:<local_port>` and pipes data bidirectionally
 /// between the tunnel stream and the local TCP connection.
-pub async fn bridge_to_local(
-    mut tunnel: TunnelTcpStream,
-    local_port: u16,
-) {
+pub async fn bridge_to_local(mut tunnel: TunnelTcpStream, local_port: u16) {
     let local_addr = format!("127.0.0.1:{}", local_port);
     let local_stream = match TcpStream::connect(&local_addr).await {
         Ok(s) => s,

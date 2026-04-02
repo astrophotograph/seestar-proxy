@@ -60,7 +60,9 @@ async fn start_triggered_telescope() -> (SocketAddr, oneshot::Sender<Vec<Vec<u8>
     let (tx, rx) = oneshot::channel::<Vec<Vec<u8>>>();
 
     tokio::spawn(async move {
-        let Ok((mut stream, _)) = listener.accept().await else { return };
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
         // Wait until the test signals which frames to send.
         if let Ok(frames) = rx.await {
             for frame in frames {
@@ -79,7 +81,12 @@ async fn start_triggered_telescope() -> (SocketAddr, oneshot::Sender<Vec<Vec<u8>
 
 async fn start_proxy(telescope_addr: SocketAddr) -> SocketAddr {
     let proxy_addr = free_addr();
-    tokio::spawn(seestar_proxy::imaging::run(proxy_addr, Some(telescope_addr), false, None, None));
+    tokio::spawn(seestar_proxy::imaging::run(
+        proxy_addr,
+        telescope_addr,
+        None,
+        None,
+    ));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
     proxy_addr
 }
@@ -212,8 +219,7 @@ async fn proxy_records_image_frames() {
     let proxy_addr = free_addr();
     tokio::spawn(seestar_proxy::imaging::run(
         proxy_addr,
-        Some(telescope_addr),
-        false,
+        telescope_addr,
         Some(recorder.clone()),
         None,
     ));
@@ -241,10 +247,7 @@ async fn proxy_records_image_frames() {
 
     assert_eq!(entries.len(), 1, "expected one recorded frame file");
     assert!(
-        entries[0]
-            .file_name()
-            .to_string_lossy()
-            .contains("preview"),
+        entries[0].file_name().to_string_lossy().contains("preview"),
         "expected a preview frame file"
     );
 }

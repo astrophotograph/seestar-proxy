@@ -36,7 +36,9 @@ fn parse_query_name(data: &[u8]) -> Option<(String, usize)> {
         if !name.is_empty() {
             name.push('.');
         }
-        name.push_str(&String::from_utf8_lossy(&data[pos + 1..pos + 1 + label_len]));
+        name.push_str(&String::from_utf8_lossy(
+            &data[pos + 1..pos + 1 + label_len],
+        ));
         pos += 1 + label_len;
     }
 
@@ -106,7 +108,10 @@ pub fn build_dns_response(query: &[u8], ip: [u8; 4]) -> Option<Vec<u8>> {
     ]);
     resp.extend_from_slice(&ip); // RDATA: IPv4 address
 
-    debug!("DNS: responding to '{}' with {}.{}.{}.{}", name, ip[0], ip[1], ip[2], ip[3]);
+    debug!(
+        "DNS: responding to '{}' with {}.{}.{}.{}",
+        name, ip[0], ip[1], ip[2], ip[3]
+    );
 
     Some(resp)
 }
@@ -118,10 +123,7 @@ pub fn build_dns_response(query: &[u8], ip: [u8; 4]) -> Option<Vec<u8>> {
 ///
 /// `ip_packet` is the full IPv4 packet containing the UDP DNS query.
 /// Returns `Some(response_ip_packet)` if handled.
-pub fn handle_dns_query(
-    ip_packet: &[u8],
-    upstream_ip: [u8; 4],
-) -> Option<Vec<u8>> {
+pub fn handle_dns_query(ip_packet: &[u8], upstream_ip: [u8; 4]) -> Option<Vec<u8>> {
     if ip_packet.len() < 28 {
         return None;
     }
@@ -163,7 +165,10 @@ pub fn handle_dns_query(
         return None; // Not a Seestar query — let it pass through.
     }
 
-    info!("DNS: intercepting query for '{}' — responding with Seestar IP", name);
+    info!(
+        "DNS: intercepting query for '{}' — responding with Seestar IP",
+        name
+    );
 
     // Build DNS response.
     let dns_response = build_dns_response(dns_payload, upstream_ip)?;
@@ -171,9 +176,9 @@ pub fn handle_dns_query(
     // Wrap in a UDP/IP packet back to the client.
     let dst_ip = [ip_packet[16], ip_packet[17], ip_packet[18], ip_packet[19]]; // DNS server IP
     let response_packet = super::tunnel_discovery::build_discovery_response(
-        dst_ip,     // FROM: the DNS server IP the client queried
-        src_ip,     // TO: the client
-        src_port,   // TO: the client's source port
+        dst_ip,   // FROM: the DNS server IP the client queried
+        src_ip,   // TO: the client
+        src_port, // TO: the client's source port
         &dns_response,
     );
 
@@ -182,10 +187,7 @@ pub fn handle_dns_query(
 
 /// Forward a DNS query to an upstream server and return the response.
 /// This is used for non-Seestar queries to keep the phone's DNS working.
-pub async fn forward_dns_query(
-    dns_payload: &[u8],
-    upstream_dns: SocketAddr,
-) -> Option<Vec<u8>> {
+pub async fn forward_dns_query(dns_payload: &[u8], upstream_dns: SocketAddr) -> Option<Vec<u8>> {
     let socket = UdpSocket::bind("0.0.0.0:0").await.ok()?;
     socket.send_to(dns_payload, upstream_dns).await.ok()?;
 
@@ -193,7 +195,9 @@ pub async fn forward_dns_query(
     match tokio::time::timeout(
         std::time::Duration::from_secs(2),
         socket.recv_from(&mut buf),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok((n, _))) => Some(buf[..n].to_vec()),
         _ => None,
     }
@@ -284,7 +288,7 @@ mod tests {
         pkt[2..4].copy_from_slice(&total_len.to_be_bytes());
         pkt[9] = 17; // UDP
         pkt[12..16].copy_from_slice(&[10, 99, 0, 2]); // client
-        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]);   // DNS server
+        pkt[16..20].copy_from_slice(&[1, 1, 1, 1]); // DNS server
         pkt[20..22].copy_from_slice(&12345u16.to_be_bytes()); // src port
         pkt[22..24].copy_from_slice(&53u16.to_be_bytes()); // dst port = DNS
         pkt[24..26].copy_from_slice(&udp_len.to_be_bytes());

@@ -220,8 +220,7 @@ mod tests {
         set_json_rpc_id(&mut msg, 99);
         assert_eq!(json_rpc_id(&msg), Some(99));
 
-        let event: Value =
-            serde_json::from_str(r#"{"Event": "PiStatus", "temp": 35.0}"#).unwrap();
+        let event: Value = serde_json::from_str(r#"{"Event": "PiStatus", "temp": 35.0}"#).unwrap();
         assert!(is_event(&event));
 
         let response: Value =
@@ -295,8 +294,7 @@ mod tests {
         assert!(is_event(&with_event));
 
         // Having an id alongside Event still counts as an event
-        let with_both: Value =
-            serde_json::from_str(r#"{"Event": "Alert", "id": 5}"#).unwrap();
+        let with_both: Value = serde_json::from_str(r#"{"Event": "Alert", "id": 5}"#).unwrap();
         assert!(is_event(&with_both));
 
         let without_event: Value = serde_json::from_str(r#"{"id": 1, "code": 0}"#).unwrap();

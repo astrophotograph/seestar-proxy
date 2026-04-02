@@ -48,10 +48,10 @@ pub fn parse_discovery_request(ip_packet: &[u8]) -> Option<([u8; 4], u16, &[u8])
 ///
 /// The response is sent FROM the Seestar's IP back TO the client's IP/port.
 pub fn build_discovery_response(
-    src_ip: [u8; 4],     // Seestar IP (we're pretending to be)
-    dst_ip: [u8; 4],     // Client IP in the tunnel
-    dst_port: u16,        // Client's source port
-    payload: &[u8],       // JSON response
+    src_ip: [u8; 4], // Seestar IP (we're pretending to be)
+    dst_ip: [u8; 4], // Client IP in the tunnel
+    dst_port: u16,   // Client's source port
+    payload: &[u8],  // JSON response
 ) -> Vec<u8> {
     let ip_header_len = 20;
     let udp_header_len = 8;
@@ -80,7 +80,7 @@ pub fn build_discovery_response(
     let udp_start = ip_header_len;
     let udp_len = (udp_header_len + payload.len()) as u16;
     packet[udp_start..udp_start + 2].copy_from_slice(&DISCOVERY_PORT.to_be_bytes()); // Src port
-    packet[udp_start + 2..udp_start + 4].copy_from_slice(&dst_port.to_be_bytes());   // Dst port
+    packet[udp_start + 2..udp_start + 4].copy_from_slice(&dst_port.to_be_bytes()); // Dst port
     packet[udp_start + 4..udp_start + 6].copy_from_slice(&udp_len.to_be_bytes());
     // UDP checksum at [udp_start+6..udp_start+8] — leave as 0 (optional for IPv4)
 
@@ -138,12 +138,8 @@ pub fn handle_discovery(
 
     // Build response with the upstream device info.
     let response_bytes = device_info_json.as_bytes();
-    let response_packet = build_discovery_response(
-        upstream_ip,
-        client_ip,
-        client_port,
-        response_bytes,
-    );
+    let response_packet =
+        build_discovery_response(upstream_ip, client_ip, client_port, response_bytes);
 
     debug!(
         "WireGuard tunnel: sending discovery response ({} bytes)",
@@ -189,8 +185,7 @@ pub fn handle_icmp_echo(ip_packet: &[u8], upstream_ip: [u8; 4]) -> Option<Vec<u8
 
     debug!(
         "WireGuard tunnel: ICMP echo request from {}.{}.{}.{} -> {}.{}.{}.{}",
-        src_ip[0], src_ip[1], src_ip[2], src_ip[3],
-        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
+        src_ip[0], src_ip[1], src_ip[2], src_ip[3], dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
     );
 
     // Build the echo reply: swap src/dst IPs, change type 8→0, fix checksums.
@@ -244,7 +239,7 @@ mod tests {
         // TCP packet (proto=6)
         let mut pkt = vec![0u8; 40];
         pkt[0] = 0x45; // IPv4, IHL=5
-        pkt[9] = 6;    // TCP
+        pkt[9] = 6; // TCP
         assert!(parse_discovery_request(&pkt).is_none());
     }
 
@@ -285,12 +280,7 @@ mod tests {
     #[test]
     fn build_response_has_correct_structure() {
         let payload = b"hello";
-        let pkt = build_discovery_response(
-            [10, 0, 0, 1],
-            [10, 99, 0, 2],
-            54321,
-            payload,
-        );
+        let pkt = build_discovery_response([10, 0, 0, 1], [10, 99, 0, 2], 54321, payload);
         assert_eq!(pkt.len(), 20 + 8 + 5); // IP + UDP + payload
         assert_eq!(pkt[0] & 0xf0, 0x40); // IPv4
         assert_eq!(pkt[9], 17); // UDP
@@ -338,7 +328,7 @@ mod tests {
         pkt[0] = 0x45; // IPv4, IHL=5
         pkt[2..4].copy_from_slice(&total_len.to_be_bytes());
         pkt[8] = 64; // TTL
-        pkt[9] = 1;  // ICMP
+        pkt[9] = 1; // ICMP
         pkt[12..16].copy_from_slice(&src);
         pkt[16..20].copy_from_slice(&dst);
         // IP checksum

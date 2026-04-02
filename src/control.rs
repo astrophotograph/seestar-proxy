@@ -13,11 +13,11 @@ use crate::protocol;
 use crate::recorder::Recorder;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, oneshot, Mutex, Notify};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 /// Maximum number of requests that may be simultaneously awaiting telescope
@@ -46,8 +46,7 @@ struct ControlState {
 /// Run the control proxy.
 pub async fn run(
     bind_addr: std::net::SocketAddr,
-    upstream_addr: Option<std::net::SocketAddr>,
-    transparent: bool,
+    upstream_addr: std::net::SocketAddr,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
     hooks: Option<Arc<HookEngine>>,
@@ -69,14 +68,6 @@ pub async fn run(
     let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
     let upstream_started = Arc::new(Notify::new());
 
-    // In transparent mode, the upstream address is resolved from
-    // SO_ORIGINAL_DST on the first client connection.
-    let resolved_upstream: Arc<tokio::sync::OnceCell<std::net::SocketAddr>> =
-        Arc::new(tokio::sync::OnceCell::new());
-    if let Some(addr) = upstream_addr {
-        let _ = resolved_upstream.set(addr);
-    }
-
     // Give hook scripts access to the upstream channel immediately so they
     // can inject auth messages (e.g. authenticate.lua) when the first client connects.
     if let Some(h) = &hooks {
@@ -94,18 +85,10 @@ pub async fn run(
         let upstream_tx_hb = upstream_tx.clone();
         let metrics_up = metrics.clone();
         let hooks_up = hooks.clone();
-        let resolved_upstream = resolved_upstream.clone();
 
         tokio::spawn(async move {
             // Wait until a client connects before starting upstream work.
             upstream_started.notified().await;
-
-            // Get the upstream address (set by config or by first transparent client).
-            let upstream_addr = *resolved_upstream.get_or_init(|| async {
-                // This shouldn't happen — the accept loop sets it before notifying.
-                error!("BUG: upstream address not resolved before upstream task started");
-                std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 4700)
-            }).await;
 
             // Heartbeat: spawned once, skips iterations while handshake pending.
             // Checks the flag each cycle so it re-gates correctly after reconnects.
@@ -117,7 +100,10 @@ pub async fn run(
                         continue;
                     }
                     let id = next_id.fetch_add(1, Ordering::Relaxed);
-                    let msg = format!(r#"{{"id":{},"method":"test_connection","params":"verify"}}"#, id);
+                    let msg = format!(
+                        r#"{{"id":{},"method":"test_connection","params":"verify"}}"#,
+                        id
+                    );
                     debug!("Heartbeat: id={}", id);
                     if upstream_tx_hb.send(msg).await.is_err() {
                         break;
@@ -140,7 +126,10 @@ pub async fn run(
                     {
                         Ok(Ok(s)) => break s,
                         Ok(Err(e)) => error!("Failed to connect to telescope control: {}", e),
-                        Err(_) => error!("Timed out connecting to telescope control at {}", upstream_addr),
+                        Err(_) => error!(
+                            "Timed out connecting to telescope control at {}",
+                            upstream_addr
+                        ),
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 };
@@ -160,9 +149,9 @@ pub async fn run(
                             "code": -1,
                             "error": "telescope reconnecting"
                         });
-                        let _ = pending.client_tx.try_send(
-                            serde_json::to_string(&err).unwrap_or_default()
-                        );
+                        let _ = pending
+                            .client_tx
+                            .try_send(serde_json::to_string(&err).unwrap_or_default());
                     }
                 }
 
@@ -224,18 +213,6 @@ pub async fn run(
         let _ = client_stream.set_nodelay(true);
         info!("Control client connected: {}", client_addr);
 
-        // In transparent mode, resolve upstream from SO_ORIGINAL_DST on first client.
-        #[cfg(unix)]
-        if transparent && resolved_upstream.get().is_none() {
-            use std::os::unix::io::AsRawFd;
-            if let Some(orig) = crate::transparent::get_original_dst(client_stream.as_raw_fd()) {
-                info!("Transparent mode: resolved upstream from SO_ORIGINAL_DST: {}", orig);
-                let _ = resolved_upstream.set(orig);
-            } else {
-                warn!("Transparent mode: SO_ORIGINAL_DST not available on this connection");
-            }
-        }
-
         // Trigger upstream connection on first client.
         if !upstream_started_once.swap(true, Ordering::Relaxed) {
             upstream_started.notify_one();
@@ -255,7 +232,8 @@ pub async fn run(
             m.control_clients.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(h) = &hooks {
-            h.on_client_connect(&client_addr.to_string(), "control").await;
+            h.on_client_connect(&client_addr.to_string(), "control")
+                .await;
         }
         tokio::spawn(async move {
             if let Err(e) = handle_client(
@@ -276,7 +254,8 @@ pub async fn run(
                 m.control_clients.fetch_sub(1, Ordering::Relaxed);
             }
             if let Some(h) = &hooks_c {
-                h.on_client_disconnect(&client_addr.to_string(), "control").await;
+                h.on_client_disconnect(&client_addr.to_string(), "control")
+                    .await;
             }
             info!("Control client disconnected: {}", client_addr);
         });
@@ -377,7 +356,10 @@ async fn handle_client(
         let mut msg: Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(_) => {
-                warn!("Invalid JSON from client: {}", &trimmed[..trimmed.len().min(100)]);
+                warn!(
+                    "Invalid JSON from client: {}",
+                    &trimmed[..trimmed.len().min(100)]
+                );
                 continue;
             }
         };
@@ -387,17 +369,21 @@ async fn handle_client(
             match h.on_request(&msg).await {
                 HookAction::Forward => {}
                 HookAction::Block => {
-                    debug!("Hook blocked request: {}", &trimmed[..trimmed.len().min(100)]);
+                    debug!(
+                        "Hook blocked request: {}",
+                        &trimmed[..trimmed.len().min(100)]
+                    );
                     continue;
                 }
-                HookAction::Modify(new_json) => {
-                    match serde_json::from_str(&new_json) {
-                        Ok(v) => msg = v,
-                        Err(e) => warn!("Hook returned invalid JSON: {}", e),
-                    }
-                }
+                HookAction::Modify(new_json) => match serde_json::from_str(&new_json) {
+                    Ok(v) => msg = v,
+                    Err(e) => warn!("Hook returned invalid JSON: {}", e),
+                },
                 HookAction::Reply(reply_json) => {
-                    debug!("Hook synthetic reply: {}", &reply_json[..reply_json.len().min(100)]);
+                    debug!(
+                        "Hook synthetic reply: {}",
+                        &reply_json[..reply_json.len().min(100)]
+                    );
                     let _ = response_tx.send(reply_json).await;
                     continue;
                 }
@@ -531,7 +517,10 @@ async fn upstream_reader_task(
     loop {
         let n = match reader.read(&mut tmp).await {
             Ok(0) => {
-                error!("Upstream telescope disconnected (EOF) after {} bytes, {} messages", total_bytes, total_messages);
+                error!(
+                    "Upstream telescope disconnected (EOF) after {} bytes, {} messages",
+                    total_bytes, total_messages
+                );
                 break;
             }
             Ok(n) => n,
@@ -547,7 +536,10 @@ async fn upstream_reader_task(
         if newline_count > 0 || buf.len() > 1000 {
             info!(
                 "Upstream: +{} bytes ({} newlines), buf={}, total={}",
-                n, newline_count, buf.len(), total_bytes
+                n,
+                newline_count,
+                buf.len(),
+                total_bytes
             );
         }
 
@@ -611,7 +603,11 @@ async fn upstream_reader_task(
                 debug!("Event: {}", event_name);
                 if let Some(m) = &metrics {
                     m.control_events.fetch_add(1, Ordering::Relaxed);
-                    m.push_log_with_payload("ctrl-evt", event_name.to_string(), Some(trimmed.clone()));
+                    m.push_log_with_payload(
+                        "ctrl-evt",
+                        event_name.to_string(),
+                        Some(trimmed.clone()),
+                    );
                 }
 
                 // Run event hook.
@@ -648,19 +644,27 @@ async fn upstream_reader_task(
                     let method = protocol::method_name(&response).unwrap_or("?");
                     info!(
                         "Response routed: method={} id {} -> {:?}",
-                        method,
-                        remapped_id,
-                        pending.original_id
+                        method, remapped_id, pending.original_id
                     );
                     if let Some(m) = &metrics {
-                        m.push_log_with_payload("ctrl-rx", method.to_string(), Some(response_str.clone()));
+                        m.push_log_with_payload(
+                            "ctrl-rx",
+                            method.to_string(),
+                            Some(response_str.clone()),
+                        );
                     }
 
                     if pending.client_tx.try_send(response_str).is_err() {
-                        warn!("Client channel full/closed for id {:?}", pending.original_id);
+                        warn!(
+                            "Client channel full/closed for id {:?}",
+                            pending.original_id
+                        );
                     }
                 } else {
-                    debug!("Response for untracked id {}, routing via on_response hook", remapped_id);
+                    debug!(
+                        "Response for untracked id {}, routing via on_response hook",
+                        remapped_id
+                    );
                     let should_broadcast = if let Some(h) = &hooks {
                         match h.on_response(&msg).await {
                             HookAction::Forward => true,
@@ -701,8 +705,7 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     /// Returns (writer_end, reader_half): write to writer_end, read from reader_half.
-    async fn loopback_read_half()
-    -> (TcpStream, tokio::net::tcp::OwnedReadHalf) {
+    async fn loopback_read_half() -> (TcpStream, tokio::net::tcp::OwnedReadHalf) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let writer_end = TcpStream::connect(addr).await.unwrap();
@@ -737,7 +740,16 @@ mod tests {
         let state = pending_state(10000, client_tx, 42);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        let task = tokio::spawn(upstream_reader_task(reader, state.clone(), event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        let task = tokio::spawn(upstream_reader_task(
+            reader,
+            state.clone(),
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         mock_telescope
             .write_all(b"{\"id\":10000,\"code\":0,\"result\":null}\r\n")
@@ -769,7 +781,16 @@ mod tests {
         let state = pending_state(99999, client_tx, 7);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         mock_telescope
             .write_all(b"{\"id\":99999,\"code\":0,\"result\":{\"foo\":\"bar\"}}\r\n")
@@ -795,20 +816,35 @@ mod tests {
         let state = Arc::new(Mutex::new(ControlState {
             pending: {
                 let mut m = HashMap::new();
-                m.insert(10001, PendingRequest {
-                    client_tx: tx_a,
-                    original_id: serde_json::Value::from(1u64),
-                });
-                m.insert(10002, PendingRequest {
-                    client_tx: tx_b,
-                    original_id: serde_json::Value::from(2u64),
-                });
+                m.insert(
+                    10001,
+                    PendingRequest {
+                        client_tx: tx_a,
+                        original_id: serde_json::Value::from(1u64),
+                    },
+                );
+                m.insert(
+                    10002,
+                    PendingRequest {
+                        client_tx: tx_b,
+                        original_id: serde_json::Value::from(2u64),
+                    },
+                );
                 m
             },
         }));
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         // Send responses out of order
         mock_telescope
@@ -838,11 +874,22 @@ mod tests {
     #[tokio::test]
     async fn broadcasts_event_to_all_clients() {
         let (mut mock_telescope, reader) = loopback_read_half().await;
-        let state = Arc::new(Mutex::new(ControlState { pending: HashMap::new() }));
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         mock_telescope
             .write_all(b"{\"Event\":\"PiStatus\",\"temp\":42.0}\r\n")
@@ -864,11 +911,22 @@ mod tests {
         // A response whose remapped id is not in the pending map gets broadcast
         // as a fallback so clients are not silently dropped.
         let (mut mock_telescope, reader) = loopback_read_half().await;
-        let state = Arc::new(Mutex::new(ControlState { pending: HashMap::new() }));
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         mock_telescope
             .write_all(b"{\"id\":55555,\"code\":0}\r\n")
@@ -887,11 +945,22 @@ mod tests {
     #[tokio::test]
     async fn skips_invalid_json_lines() {
         let (mut mock_telescope, reader) = loopback_read_half().await;
-        let state = Arc::new(Mutex::new(ControlState { pending: HashMap::new() }));
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         // Invalid JSON followed by a valid event — the valid one should arrive
         mock_telescope
@@ -915,11 +984,22 @@ mod tests {
     #[tokio::test]
     async fn skips_empty_lines() {
         let (mut mock_telescope, reader) = loopback_read_half().await;
-        let state = Arc::new(Mutex::new(ControlState { pending: HashMap::new() }));
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
         let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
         let handshake_done = Arc::new(AtomicBool::new(false));
 
-        tokio::spawn(upstream_reader_task(reader, state, event_tx, None, handshake_done, None, None, oneshot::channel().0));
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         mock_telescope.write_all(b"\r\n  \r\n").await.unwrap();
         mock_telescope

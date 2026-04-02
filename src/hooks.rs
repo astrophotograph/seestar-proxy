@@ -36,8 +36,8 @@ use serde_json::Value;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 /// Result of a hook invocation.
@@ -139,8 +139,12 @@ impl HookEngine {
         } else {
             info!(
                 "Hook functions: request={} response={} event={} upstream={} connect={} disconnect={}",
-                has_on_request, has_on_response, has_on_event,
-                has_on_upstream_connect, has_on_client_connect, has_on_client_disconnect
+                has_on_request,
+                has_on_response,
+                has_on_event,
+                has_on_upstream_connect,
+                has_on_client_connect,
+                has_on_client_disconnect
             );
         }
 
@@ -319,7 +323,10 @@ impl HookEngine {
                             match serde_json::to_string(&modified) {
                                 Ok(s) => HookAction::Reply(s),
                                 Err(e) => {
-                                    warn!("{} hook: failed to serialize reply table: {}", func_name, e);
+                                    warn!(
+                                        "{} hook: failed to serialize reply table: {}",
+                                        func_name, e
+                                    );
                                     HookAction::Block
                                 }
                             }
@@ -327,14 +334,20 @@ impl HookEngine {
                             match serde_json::to_string(&modified) {
                                 Ok(s) => HookAction::Modify(s),
                                 Err(e) => {
-                                    warn!("{} hook: failed to serialize modified table: {}", func_name, e);
+                                    warn!(
+                                        "{} hook: failed to serialize modified table: {}",
+                                        func_name, e
+                                    );
                                     HookAction::Forward
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        warn!("{} hook: failed to convert Lua table to JSON: {}", func_name, e);
+                        warn!(
+                            "{} hook: failed to convert Lua table to JSON: {}",
+                            func_name, e
+                        );
                         HookAction::Forward
                     }
                 }
@@ -369,14 +382,16 @@ mod tests {
 
     #[tokio::test]
     async fn block_by_string() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_request(msg)
                 if msg.method == "scope_park" then
                     return "block"
                 end
                 return "forward"
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         let park = json!({"id": 1, "method": "scope_park"});
@@ -388,11 +403,13 @@ mod tests {
 
     #[tokio::test]
     async fn block_by_boolean() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_request(msg)
                 return msg.method ~= "scope_park"
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         let park = json!({"id": 1, "method": "scope_park"});
@@ -404,12 +421,14 @@ mod tests {
 
     #[tokio::test]
     async fn modify_by_returning_table() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_request(msg)
                 msg.extra = "injected"
                 return msg
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         let msg = json!({"id": 1, "method": "test"});
@@ -426,7 +445,8 @@ mod tests {
 
     #[tokio::test]
     async fn telescope_state_accessible() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_request(msg)
                 if msg.method == "scope_park" and telescope.is_stacking then
                     log("Blocking park during stacking")
@@ -434,7 +454,8 @@ mod tests {
                 end
                 return "forward"
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         // Not stacking — park should forward.
@@ -452,14 +473,16 @@ mod tests {
 
     #[tokio::test]
     async fn on_event_can_filter() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_event(msg)
                 if msg.Event == "PiStatus" then
                     return "forward"
                 end
                 return "block"
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         let pi = json!({"Event": "PiStatus", "temp": 35.0});
@@ -471,11 +494,13 @@ mod tests {
 
     #[tokio::test]
     async fn script_error_defaults_to_forward() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_request(msg)
                 error("intentional crash")
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         let msg = json!({"id": 1, "method": "test"});
@@ -485,11 +510,13 @@ mod tests {
 
     #[tokio::test]
     async fn nil_return_means_forward() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_request(msg)
                 -- no return = nil
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
 
         let msg = json!({"id": 1, "method": "test"});
@@ -532,7 +559,10 @@ mod auth_tests {
         let src = match std::fs::read_to_string(&script_path) {
             Ok(s) => s,
             Err(_) => {
-                eprintln!("Skipping: hooks/authenticate.lua not found at {}", script_path.display());
+                eprintln!(
+                    "Skipping: hooks/authenticate.lua not found at {}",
+                    script_path.display()
+                );
                 return None;
             }
         };
@@ -591,11 +621,13 @@ mod auth_tests {
 
     #[tokio::test]
     async fn telescope_send_delivers_to_channel() {
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_client_connect(addr, port_type)
                 telescope.send({ id = 42, method = "ping", params = "verify" })
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
         let (tx, mut rx) = mpsc::channel(8);
         engine.set_upstream_tx(tx);
@@ -611,11 +643,13 @@ mod auth_tests {
     #[tokio::test]
     async fn telescope_send_without_upstream_does_not_panic() {
         // telescope.send before set_upstream_tx is called should warn but not crash.
-        let script = write_script(r#"
+        let script = write_script(
+            r#"
             function on_client_connect(addr, port_type)
                 telescope.send({ id = 1, method = "test", params = "verify" })
             end
-        "#);
+        "#,
+        );
         let engine = HookEngine::new(&[script.path()]).unwrap();
         // Deliberately do NOT call set_upstream_tx.
         engine.on_client_connect("127.0.0.1:1234", "control").await;
@@ -626,7 +660,9 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_connect_sends_get_verify_str() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
 
         engine.on_upstream_connect("192.168.1.1:4700").await;
 
@@ -638,7 +674,9 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_does_not_trigger_without_upstream_connect() {
-        let Some((_engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((_engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
 
         // No on_upstream_connect called — nothing should be sent.
         assert!(drain(&mut rx).await.is_empty());
@@ -646,7 +684,9 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_reconnect_re_triggers_handshake() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
 
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await; // consume first get_verify_str
@@ -661,7 +701,9 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_full_happy_path() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
 
         // 1. Connect → get_verify_str sent
         engine.on_upstream_connect("192.168.1.1:4700").await;
@@ -676,21 +718,23 @@ mod auth_tests {
         let step2 = drain(&mut rx).await;
         assert_eq!(step2.len(), 1);
         assert_eq!(step2[0]["method"], "verify_client");
-        assert!(!step2[0]["params"]["sign"].as_str().unwrap_or("").is_empty(), "sign must be non-empty");
-        assert_eq!(step2[0]["params"]["data"], "challenge-xyz", "data must echo the original challenge");
+        assert!(
+            !step2[0]["params"]["sign"].as_str().unwrap_or("").is_empty(),
+            "sign must be non-empty"
+        );
+        assert_eq!(
+            step2[0]["params"]["data"], "challenge-xyz",
+            "data must echo the original challenge"
+        );
 
         // 3. Verify accepted → response blocked, pi_is_verified injected
-        let action = engine
-            .on_response(&json!({"id": 1002, "code": 0}))
-            .await;
+        let action = engine.on_response(&json!({"id": 1002, "code": 0})).await;
         assert_eq!(action, HookAction::Block);
         let step3 = drain(&mut rx).await;
         assert_eq!(step3[0]["method"], "pi_is_verified");
 
         // 4. Final ack → response blocked, auth done
-        let action = engine
-            .on_response(&json!({"id": 1003, "code": 0}))
-            .await;
+        let action = engine.on_response(&json!({"id": 1003, "code": 0})).await;
         assert_eq!(action, HookAction::Block);
         assert!(drain(&mut rx).await.is_empty());
 
@@ -703,7 +747,9 @@ mod auth_tests {
 
     #[tokio::test]
     async fn requests_blocked_until_auth_done() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
         let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
 
         // Idle (before first connect): blocked
@@ -717,7 +763,9 @@ mod auth_tests {
         assert_eq!(engine.on_request(&req).await, HookAction::Block);
 
         // Advance through all three steps
-        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
+        engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}}))
+            .await;
         drain(&mut rx).await;
         engine.on_response(&json!({"id": 1002, "code": 0})).await;
         drain(&mut rx).await;
@@ -729,11 +777,15 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_methods_get_synthetic_reply_from_clients() {
-        let Some((engine, _rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, _rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
 
         // Complete auth so state=done, confirming synthetic replies are unconditional.
         engine.on_upstream_connect("192.168.1.1:4700").await;
-        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
+        engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}}))
+            .await;
         engine.on_response(&json!({"id": 1002, "code": 0})).await;
         engine.on_response(&json!({"id": 1003, "code": 0})).await;
 
@@ -753,11 +805,15 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_fails_gracefully_on_missing_key() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_FAIL) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_FAIL) else {
+            return;
+        };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await; // consume get_verify_str
 
-        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge"}})).await;
+        engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge"}}))
+            .await;
 
         // state=failed → requests pass through
         let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
@@ -766,11 +822,15 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_fails_on_empty_challenge() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await;
 
-        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": ""}})).await;
+        engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": ""}}))
+            .await;
 
         let req = json!({"id": 1, "method": "get_device_state", "params": "verify"});
         assert_eq!(engine.on_request(&req).await, HookAction::Forward);
@@ -778,11 +838,15 @@ mod auth_tests {
 
     #[tokio::test]
     async fn auth_fails_on_verify_rejection() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await;
 
-        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge"}})).await;
+        engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": "challenge"}}))
+            .await;
         drain(&mut rx).await; // consume verify_client
 
         engine.on_response(&json!({"id": 1002, "code": -1})).await;
@@ -793,10 +857,14 @@ mod auth_tests {
 
     #[tokio::test]
     async fn pi_is_verified_nonzero_is_non_fatal() {
-        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
+        let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else {
+            return;
+        };
         engine.on_upstream_connect("192.168.1.1:4700").await;
         drain(&mut rx).await;
-        engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
+        engine
+            .on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}}))
+            .await;
         drain(&mut rx).await;
         engine.on_response(&json!({"id": 1002, "code": 0})).await;
         drain(&mut rx).await;

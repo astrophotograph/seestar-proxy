@@ -23,22 +23,11 @@ use tracing::{error, info, warn};
 ///    the proxy's bind address.
 pub async fn run(
     bind_addr: IpAddr,
-    upstream_addr: Option<IpAddr>,
+    upstream_addr: IpAddr,
     _proxy_control_port: u16,
 ) -> anyhow::Result<()> {
     // First, discover the upstream Seestar to get its device info.
-    let device_info = if let Some(addr) = upstream_addr {
-        probe_upstream(addr).await?
-    } else {
-        // Transparent mode without --upstream: use minimal info until a client connects.
-        info!("Discovery: no upstream address, using minimal device info (transparent mode)");
-        serde_json::json!({
-            "result": {
-                "name": "Seestar",
-                "host": {},
-            }
-        })
-    };
+    let device_info = probe_upstream(upstream_addr).await?;
     info!(
         "Cached upstream device info: {}",
         serde_json::to_string(&device_info).unwrap_or_default()
@@ -119,10 +108,7 @@ pub async fn run(
             Err(_) => continue,
         };
 
-        let method = request
-            .get("method")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
         if method != "scan_iscope" {
             continue;
@@ -155,10 +141,8 @@ pub async fn run(
         }
 
         // Also broadcast so same-machine apps see it on the physical interface.
-        let broadcast_dest = SocketAddr::new(
-            IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
-            DISCOVERY_PORT,
-        );
+        let broadcast_dest =
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::BROADCAST), DISCOVERY_PORT);
         if let Err(e) = out.send_to(&response_bytes, broadcast_dest).await {
             warn!("Failed to broadcast discovery response: {}", e);
         }
@@ -219,7 +203,10 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(e),
         Err(_) => {
-            warn!("Discovery probe to {} timed out, using minimal info", upstream_addr);
+            warn!(
+                "Discovery probe to {} timed out, using minimal info",
+                upstream_addr
+            );
             // Fallback: try TCP get_device_state to build a proper response.
             warn!("Trying TCP fallback for device info...");
             match fetch_device_info_tcp(upstream_addr).await {
@@ -252,21 +239,27 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
     use tokio::net::TcpStream;
 
     let addr = SocketAddr::new(upstream_addr, 4700);
-    let stream = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        TcpStream::connect(addr),
-    ).await.ok()?.ok()?;
+    let stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr))
+        .await
+        .ok()?
+        .ok()?;
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    writer.write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n").await.ok()?;
+    writer
+        .write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n")
+        .await
+        .ok()?;
 
     let mut line = String::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
         reader.read_line(&mut line),
-    ).await.ok()?.ok()?;
+    )
+    .await
+    .ok()?
+    .ok()?;
 
     let parsed: Value = serde_json::from_str(line.trim()).ok()?;
     let result = parsed.get("result")?;
@@ -286,6 +279,9 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
         "id": 201
     });
 
-    info!("Built discovery response from TCP device state: {}", discovery);
+    info!(
+        "Built discovery response from TCP device state: {}",
+        discovery
+    );
     Some(discovery)
 }
