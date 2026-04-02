@@ -33,17 +33,47 @@ pub async fn run(
         serde_json::to_string(&device_info).unwrap_or_default()
     );
 
-    // Listen for discovery broadcasts from clients.
-    let listen_addr = SocketAddr::new(bind_addr, DISCOVERY_PORT);
-    let socket = UdpSocket::bind(listen_addr).await?;
-    socket.set_broadcast(true)?;
-    info!("Discovery bridge listening on {}", listen_addr);
+    // Receive socket: bind to 0.0.0.0 to receive broadcast packets when the
+    // bind_addr is unspecified, otherwise bind to the specific address.
+    // When running on the same machine as the app with an IP alias, we need
+    // 0.0.0.0 to hear subnet broadcasts — but we only do that when the bind
+    // address is a real (non-loopback, non-unspecified) IP, implying the user
+    // set up an alias for this purpose.
+    let recv_bind_ip = match bind_addr {
+        IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => {
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        }
+        _ => bind_addr,
+    };
+    let recv_addr = SocketAddr::new(recv_bind_ip, DISCOVERY_PORT);
+    let recv_socket = UdpSocket::bind(recv_addr).await?;
+    recv_socket.set_broadcast(true)?;
+
+    // Send responses from a separate socket bound to the proxy's bind address.
+    // This ensures the UDP source IP is the proxy's address (e.g. an alias IP),
+    // not the machine's primary IP. The app uses the source IP to decide where
+    // to connect, so this is critical for same-machine setups with an IP alias.
+    //
+    // When bind_addr is unspecified, the send and recv sockets are equivalent,
+    // so we just reuse the recv socket for sending.
+    let send_socket = if bind_addr.is_unspecified() || bind_addr == recv_bind_ip {
+        None
+    } else {
+        let sock = UdpSocket::bind(SocketAddr::new(bind_addr, 0)).await?;
+        sock.set_broadcast(true)?;
+        Some(sock)
+    };
+
+    info!(
+        "Discovery bridge listening on {}, responding from {}",
+        recv_addr, bind_addr
+    );
 
     // 16 KiB covers any realistic JSON device-info payload.
     let mut buf = [0u8; 16_384];
 
     loop {
-        let (n, src_addr) = match socket.recv_from(&mut buf).await {
+        let (n, src_addr) = match recv_socket.recv_from(&mut buf).await {
             Ok(r) => r,
             Err(e) => {
                 error!("Discovery recv error: {}", e);
@@ -83,14 +113,17 @@ pub async fn run(
         // Respond with cached Seestar info.
         //
         // The app uses the SOURCE IP of the UDP response to determine where
-        // to connect. We send both a unicast reply (for the normal case) and
-        // a broadcast (for when the proxy and app are on the same machine,
-        // where unicast goes via loopback and the app may not see it —
-        // broadcast always goes through the physical NIC).
+        // to connect. We send from the send_socket (bound to the proxy's
+        // bind address) so the source IP is correct.
+        //
+        // We send both unicast (direct reply) and broadcast (ensures
+        // same-machine apps see it on the physical interface rather than
+        // only via loopback).
         let response_bytes = serde_json::to_vec(&device_info)?;
+        let out = send_socket.as_ref().unwrap_or(&recv_socket);
 
         // Unicast back to the requester.
-        if let Err(e) = socket.send_to(&response_bytes, src_addr).await {
+        if let Err(e) = out.send_to(&response_bytes, src_addr).await {
             warn!("Failed to send discovery response to {}: {}", src_addr, e);
         }
 
@@ -99,14 +132,15 @@ pub async fn run(
             IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
             DISCOVERY_PORT,
         );
-        if let Err(e) = socket.send_to(&response_bytes, broadcast_dest).await {
+        if let Err(e) = out.send_to(&response_bytes, broadcast_dest).await {
             warn!("Failed to broadcast discovery response: {}", e);
         }
 
         info!(
-            "Sent discovery response ({} bytes, unicast to {} + broadcast)",
+            "Sent discovery response ({} bytes, unicast to {} + broadcast from {})",
             response_bytes.len(),
             src_addr,
+            bind_addr,
         );
     }
 }
