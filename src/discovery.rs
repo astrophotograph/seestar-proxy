@@ -162,6 +162,12 @@ pub async fn run(
 }
 
 /// Send a discovery probe to the upstream Seestar and return its response.
+///
+/// The Seestar is picky about probe format (discovered by bisection):
+/// - `name` must not contain dashes — a dash causes malformed JSON in the response
+/// - Message must be terminated with `\r\n` — Seestar ignores probes without it
+/// - Probe must be sent from an ephemeral source port — Seestar replies unicast
+///   to the sender's port, not back to port 4720
 async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_broadcast(true)?;
@@ -176,25 +182,22 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
     let probe = serde_json::json!({
         "id": 201,
         "method": "scan_iscope",
-        "name": "seestar-proxy",
+        "name": "seestarproxy",
         "ip": local_ip
     });
 
-    // Try unicast first, then broadcast if that fails.
     let target = SocketAddr::new(upstream_addr, DISCOVERY_PORT);
-    let probe_bytes = serde_json::to_vec(&probe)?;
+    let mut probe_bytes = serde_json::to_vec(&probe)?;
+    probe_bytes.extend_from_slice(b"\r\n");
     socket.send_to(&probe_bytes, target).await?;
-
-    // Also send broadcast in case the Seestar only responds to broadcast.
-    let broadcast_target = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::BROADCAST), DISCOVERY_PORT);
-    let _ = socket.send_to(&probe_bytes, broadcast_target).await;
 
     let mut buf = [0u8; 16_384];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let (n, src) = socket.recv_from(&mut buf).await?;
             if src.ip() == upstream_addr {
-                let response: Value = serde_json::from_slice(&buf[..n])?;
+                let slice = buf[..n].trim_ascii_end();
+                let response: Value = serde_json::from_slice(slice)?;
                 return Ok::<Value, anyhow::Error>(response);
             }
         }
@@ -275,4 +278,3 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
     info!("Built discovery response from TCP device state: {}", discovery);
     Some(discovery)
 }
-
