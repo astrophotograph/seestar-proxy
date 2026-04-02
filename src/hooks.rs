@@ -49,6 +49,9 @@ pub enum HookAction {
     Block,
     /// Forward a modified message (the string is the new JSON).
     Modify(String),
+    /// Send a synthetic response directly back to the client without forwarding to the telescope.
+    /// The string is the JSON response to deliver. Used by hooks to fake responses (e.g. auth).
+    Reply(String),
 }
 
 /// Manages Lua hook scripts.
@@ -301,15 +304,35 @@ impl HookEngine {
             LuaValue::Boolean(false) => HookAction::Block,
             LuaValue::Boolean(true) => HookAction::Forward,
             LuaValue::Table(_) => {
-                // Table returned — serialize it back to JSON as modified message.
                 match lua.from_value::<Value>(result) {
-                    Ok(modified) => match serde_json::to_string(&modified) {
-                        Ok(s) => HookAction::Modify(s),
-                        Err(e) => {
-                            warn!("{} hook: failed to serialize modified table: {}", func_name, e);
-                            HookAction::Forward
+                    Ok(mut modified) => {
+                        // A table with `_reply = true` is a synthetic response to send back
+                        // to the client rather than a modified request to forward upstream.
+                        let is_reply = modified
+                            .get("_reply")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if is_reply {
+                            if let Some(obj) = modified.as_object_mut() {
+                                obj.remove("_reply");
+                            }
+                            match serde_json::to_string(&modified) {
+                                Ok(s) => HookAction::Reply(s),
+                                Err(e) => {
+                                    warn!("{} hook: failed to serialize reply table: {}", func_name, e);
+                                    HookAction::Block
+                                }
+                            }
+                        } else {
+                            match serde_json::to_string(&modified) {
+                                Ok(s) => HookAction::Modify(s),
+                                Err(e) => {
+                                    warn!("{} hook: failed to serialize modified table: {}", func_name, e);
+                                    HookAction::Forward
+                                }
+                            }
                         }
-                    },
+                    }
                     Err(e) => {
                         warn!("{} hook: failed to convert Lua table to JSON: {}", func_name, e);
                         HookAction::Forward

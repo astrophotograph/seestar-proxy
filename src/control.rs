@@ -334,6 +334,11 @@ async fn handle_client(
                         Err(e) => warn!("Hook returned invalid JSON: {}", e),
                     }
                 }
+                HookAction::Reply(reply_json) => {
+                    debug!("Hook synthetic reply: {}", &reply_json[..reply_json.len().min(100)]);
+                    let _ = response_tx.send(reply_json).await;
+                    continue;
+                }
             }
         }
 
@@ -553,7 +558,7 @@ async fn upstream_reader_task(
                             debug!("Hook blocked event: {}", event_name);
                             false
                         }
-                        HookAction::Modify(_) => true, // Can't modify events meaningfully
+                        HookAction::Modify(_) | HookAction::Reply(_) => true, // Can't modify events meaningfully
                     }
                 } else {
                     true
@@ -596,7 +601,7 @@ async fn upstream_reader_task(
                         match h.on_response(&msg).await {
                             HookAction::Forward => true,
                             HookAction::Block => false,
-                            HookAction::Modify(_) => true,
+                            HookAction::Modify(_) | HookAction::Reply(_) => true,
                         }
                     } else {
                         true
