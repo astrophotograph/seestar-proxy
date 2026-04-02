@@ -71,6 +71,13 @@ pub async fn run(
             continue;
         }
 
+        // Ignore responses (which also have method "scan_iscope") to avoid
+        // a feedback loop when we broadcast our own response and receive it
+        // back on the same socket.
+        if request.get("result").is_some() || request.get("code").is_some() {
+            continue;
+        }
+
         info!("Discovery request from {}", src_addr);
 
         // Respond with cached Seestar info.
