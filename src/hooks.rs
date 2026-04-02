@@ -566,6 +566,27 @@ mod auth_tests {
         out
     }
 
+    // ── auth script loading ───────────────────────────────────────────────────
+
+    #[test]
+    fn patched_auth_script_returns_none_when_file_missing() {
+        // Point at a path that is guaranteed not to exist.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("authenticate.lua");
+        assert!(!missing.exists());
+
+        // Replicate the logic of patched_auth_script with an arbitrary path.
+        let result = std::fs::read_to_string(&missing);
+        assert!(result.is_err(), "expected Err for missing file");
+
+        // The real helper maps Err → None; verify that contract is exercised
+        // by calling it directly.  When the real hooks/authenticate.lua is
+        // absent (e.g. CI), patched_auth_script must return None.
+        if !auth_script_path().exists() {
+            assert!(patched_auth_script(STUB_SIGN_OK).is_none());
+        }
+    }
+
     // ── telescope.send ────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -624,15 +645,18 @@ mod auth_tests {
     }
 
     #[tokio::test]
-    async fn auth_does_not_re_trigger_if_already_in_progress() {
+    async fn auth_reconnect_re_triggers_handshake() {
         let Some((engine, mut rx)) = make_engine(STUB_SIGN_OK) else { return };
 
         engine.on_upstream_connect("192.168.1.1:4700").await;
-        drain(&mut rx).await; // consume get_verify_str
+        drain(&mut rx).await; // consume first get_verify_str
 
-        // Calling again while auth is in progress must not send another get_verify_str.
+        // on_upstream_connect always resets auth state and re-triggers the handshake,
+        // so a reconnect (or duplicate connect) must emit another get_verify_str.
         engine.on_upstream_connect("192.168.1.1:4700").await;
-        assert!(drain(&mut rx).await.is_empty(), "must not re-trigger auth");
+        let msgs = drain(&mut rx).await;
+        assert_eq!(msgs.len(), 1, "reconnect must re-send get_verify_str");
+        assert_eq!(msgs[0]["method"], "get_verify_str");
     }
 
     #[tokio::test]
@@ -704,21 +728,23 @@ mod auth_tests {
     }
 
     #[tokio::test]
-    async fn auth_methods_always_blocked_from_clients() {
+    async fn auth_methods_get_synthetic_reply_from_clients() {
         let Some((engine, _rx)) = make_engine(STUB_SIGN_OK) else { return };
 
-        // Complete auth first so state=done, to confirm the block is unconditional.
+        // Complete auth so state=done, confirming synthetic replies are unconditional.
         engine.on_upstream_connect("192.168.1.1:4700").await;
         engine.on_response(&json!({"id": 1001, "code": 0, "result": {"str": "c"}})).await;
         engine.on_response(&json!({"id": 1002, "code": 0})).await;
         engine.on_response(&json!({"id": 1003, "code": 0})).await;
 
+        // The script synthesizes success responses for client auth methods so the
+        // client believes it authenticated without forwarding to the telescope.
         for method in ["get_verify_str", "verify_client", "pi_is_verified"] {
             let req = json!({"id": 1, "method": method, "params": "verify"});
-            assert_eq!(
-                engine.on_request(&req).await,
-                HookAction::Block,
-                "{method} must always be blocked from clients"
+            let action = engine.on_request(&req).await;
+            assert!(
+                matches!(action, HookAction::Reply(_)),
+                "{method} must get a synthetic reply, got {action:?}"
             );
         }
     }
