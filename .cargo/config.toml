@@ -1,2 +1,16 @@
 [target.armv7-unknown-linux-musleabihf]
 linker = "arm-linux-gnueabihf-gcc"
+
+# Export Lua symbols from the binary so dlopen'd C Lua modules (e.g. lua-openssl)
+# can resolve the Lua C API at runtime.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-export_dynamic"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-export_dynamic"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-rdynamic"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-args=-rdynamic"]

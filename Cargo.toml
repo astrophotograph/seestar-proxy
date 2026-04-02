@@ -23,13 +23,13 @@ boringtun = { version = "0.7", optional = true }
 smoltcp = { version = "0.12", optional = true, default-features = false, features = ["medium-ip", "proto-ipv4", "socket-tcp", "alloc"] }
 qrcode = { version = "0.14", optional = true, default-features = false, features = ["svg"] }
 x25519-dalek = { version = "2", optional = true, features = ["static_secrets"] }
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 socket2 = { version = "0.6.3", features = ["all"] }
 
 [features]
 default = ["wireguard"]
-wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:base64", "dep:rand_core"]
+wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:rand_core"]
 
 [dev-dependencies]
 tower = "0.5"
