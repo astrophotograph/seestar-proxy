@@ -874,8 +874,7 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 [[package]]
 name = "libtailscale"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1db18f9410fcf7b09c9cf4ce2338f9a5e7912fb5bc37c776c023078ec1f5558"
+source = "git+https://github.com/astrophotograph/libtailscale-rs.git?branch=fix%2Farm-c-char#a34d005f6513fa75f9bc0043474622532c555e95"
 dependencies = [
  "libc",
  "libtailscale-sys",
@@ -884,8 +883,7 @@ dependencies = [
 [[package]]
 name = "libtailscale-sys"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0285ec5d2b6a8ef32b87055a85447f47c05264108e598ffcd33fc122ca9850a0"
+source = "git+https://github.com/astrophotograph/libtailscale-rs.git?branch=fix%2Farm-c-char#a34d005f6513fa75f9bc0043474622532c555e95"
 dependencies = [
  "cc",
 ]

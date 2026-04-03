@@ -30,7 +30,9 @@ socket2 = { version = "0.6.3", features = ["all"] }
 libc = "0.2"
 
 # Embedded Tailscale node (feature-gated)
-libtailscale = { version = "0.2", optional = true }
+# Using fork until upstream merges ARM c_char fix:
+# https://github.com/messense/libtailscale-rs
+libtailscale = { git = "https://github.com/astrophotograph/libtailscale-rs.git", branch = "fix/arm-c-char", optional = true }
 
 [features]
 default = ["wireguard", "luajit"]
