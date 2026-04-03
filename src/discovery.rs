@@ -192,8 +192,17 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
             let (n, src) = socket.recv_from(&mut buf).await?;
             if src.ip() == upstream_addr {
                 let slice = buf[..n].trim_ascii_end();
-                let response: Value = serde_json::from_slice(slice)?;
-                return Ok::<Value, anyhow::Error>(response);
+                match serde_json::from_slice(slice) {
+                    Ok(v) => return Ok::<Value, anyhow::Error>(v),
+                    Err(e) => {
+                        warn!(
+                            "Discovery probe: ignoring malformed response from upstream ({}): {}",
+                            e,
+                            String::from_utf8_lossy(slice)
+                        );
+                        continue;
+                    }
+                }
             }
         }
     })
@@ -230,6 +239,69 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::UdpSocket;
+
+    /// Regression test: the Seestar firmware echoes the `name` field from a probe
+    /// back into its response JSON without escaping it. If another client on the
+    /// network sends a probe with a dashed name (e.g. "macbook-pro"), the Seestar's
+    /// response is malformed JSON. `probe_upstream` must skip that packet and keep
+    /// waiting rather than bubbling up a parse error.
+    #[tokio::test]
+    async fn probe_upstream_skips_malformed_then_succeeds() {
+        // Try to bind the mock telescope port; skip if already in use.
+        let mock_sock = match UdpSocket::bind("127.0.0.1:4720").await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "SKIP probe_upstream_skips_malformed_then_succeeds: could not bind 127.0.0.1:4720: {e}"
+                );
+                return;
+            }
+        };
+
+        let valid_response = serde_json::json!({
+            "id": 201,
+            "method": "scan_iscope",
+            "result": {
+                "product_model": "Seestar S50",
+                "sn": "TEST001",
+                "ip": "127.0.0.1",
+                "tcp_client_num": 0
+            },
+            "code": 0
+        });
+        let valid_bytes = serde_json::to_vec(&valid_response).unwrap();
+
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            // Receive the probe from probe_upstream.
+            let Ok((_, src)) = mock_sock.recv_from(&mut buf).await else {
+                return;
+            };
+            // Simulate the Seestar responding to a *different* client's probe that
+            // contained a dash in the name — the firmware embeds the name verbatim,
+            // producing malformed JSON.
+            let malformed =
+                b"{\"id\":201,\"method\":\"scan_iscope\",\"result\":{\"name\":\"bad-name{broken\"}";
+            let _ = mock_sock.send_to(malformed, src).await;
+            // Then send the real (valid) response.
+            let _ = mock_sock.send_to(&valid_bytes, src).await;
+        });
+
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+        let result = probe_upstream(upstream).await;
+        assert!(
+            result.is_ok(),
+            "probe_upstream should succeed despite receiving a malformed response first: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap()["result"]["sn"], "TEST001");
     }
 }
 
