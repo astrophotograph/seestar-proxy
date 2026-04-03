@@ -298,3 +298,343 @@ fn dirs_or_home(relative: &str) -> PathBuf {
         PathBuf::from("/tmp").join(relative)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn default_config() -> Config {
+        Config::parse_from(["seestar-proxy"])
+    }
+
+    // ── FileConfig ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn file_config_default_all_none() {
+        let fc = FileConfig::default();
+        assert!(fc.upstream.is_none());
+        assert!(fc.upstream_control_port.is_none());
+        assert!(fc.control_port.is_none());
+        assert!(fc.discovery.is_none());
+        assert!(fc.hooks.is_none());
+        assert!(fc.verbose.is_none());
+    }
+
+    #[test]
+    fn file_config_deserializes_from_toml() {
+        let toml = r#"
+            upstream = "192.168.1.50"
+            control_port = 9000
+            discovery = true
+            verbose = 2
+        "#;
+        let fc: FileConfig = toml::from_str(toml).unwrap();
+        assert_eq!(fc.upstream.as_deref(), Some("192.168.1.50"));
+        assert_eq!(fc.control_port, Some(9000));
+        assert_eq!(fc.discovery, Some(true));
+        assert_eq!(fc.verbose, Some(2));
+    }
+
+    #[test]
+    fn file_config_deserializes_hooks_as_paths() {
+        let toml = r#"hooks = ["/a.lua", "/b.lua"]"#;
+        let fc: FileConfig = toml::from_str(toml).unwrap();
+        let hooks = fc.hooks.unwrap();
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0], PathBuf::from("/a.lua"));
+    }
+
+    #[test]
+    fn file_config_empty_toml_gives_all_none() {
+        let fc: FileConfig = toml::from_str("").unwrap();
+        assert!(fc.upstream.is_none());
+        assert!(fc.control_port.is_none());
+    }
+
+    // ── apply_file: Option fields ─────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_fills_none_upstream() {
+        let mut cfg = default_config();
+        assert!(cfg.upstream.is_none());
+        cfg.apply_file(FileConfig {
+            upstream: Some("192.168.1.100".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.upstream.as_deref(), Some("192.168.1.100"));
+    }
+
+    #[test]
+    fn apply_file_does_not_overwrite_set_upstream() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--upstream", "cli-host"]);
+        cfg.apply_file(FileConfig {
+            upstream: Some("file-host".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.upstream.as_deref(), Some("cli-host"));
+    }
+
+    #[test]
+    fn apply_file_fills_none_wg_endpoint() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            wg_endpoint: Some("mypi.example.com:51820".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.wg_endpoint.as_deref(), Some("mypi.example.com:51820"));
+    }
+
+    #[test]
+    fn apply_file_does_not_overwrite_set_wg_endpoint() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--wg-endpoint", "cli.example.com:51820"]);
+        cfg.apply_file(FileConfig {
+            wg_endpoint: Some("file.example.com:51820".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.wg_endpoint.as_deref(), Some("cli.example.com:51820"));
+    }
+
+    #[test]
+    fn apply_file_fills_none_record() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            record: Some("/tmp/sessions".into()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.record, Some(PathBuf::from("/tmp/sessions")));
+    }
+
+    // ── apply_file: default-value ports ──────────────────────────────────────
+
+    #[test]
+    fn apply_file_overrides_default_ports() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            upstream_control_port: Some(9901),
+            upstream_imaging_port: Some(9902),
+            control_port: Some(9903),
+            imaging_port: Some(9904),
+            dashboard_port: Some(9905),
+            wg_port: Some(9906),
+            ..Default::default()
+        });
+        assert_eq!(cfg.upstream_control_port, 9901);
+        assert_eq!(cfg.upstream_imaging_port, 9902);
+        assert_eq!(cfg.control_port, 9903);
+        assert_eq!(cfg.imaging_port, 9904);
+        assert_eq!(cfg.dashboard_port, 9905);
+        assert_eq!(cfg.wg_port, 9906);
+    }
+
+    #[test]
+    fn apply_file_does_not_override_non_default_control_port() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--control-port", "9000"]);
+        cfg.apply_file(FileConfig {
+            control_port: Some(1234),
+            ..Default::default()
+        });
+        assert_eq!(cfg.control_port, 9000);
+    }
+
+    #[test]
+    fn apply_file_does_not_override_non_default_imaging_port() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--imaging-port", "9001"]);
+        cfg.apply_file(FileConfig {
+            imaging_port: Some(1234),
+            ..Default::default()
+        });
+        assert_eq!(cfg.imaging_port, 9001);
+    }
+
+    // ── apply_file: bind address ──────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_overrides_default_bind() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            bind: Some("127.0.0.1".parse().unwrap()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.bind, "127.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn apply_file_does_not_override_non_default_bind() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--bind", "10.0.0.1"]);
+        cfg.apply_file(FileConfig {
+            bind: Some("127.0.0.1".parse().unwrap()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.bind, "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    // ── apply_file: wg_subnet ─────────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_overrides_default_wg_subnet() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            wg_subnet: Some("10.1.0.0/24".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.wg_subnet, "10.1.0.0/24");
+    }
+
+    #[test]
+    fn apply_file_does_not_override_non_default_wg_subnet() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--wg-subnet", "172.16.0.0/24"]);
+        cfg.apply_file(FileConfig {
+            wg_subnet: Some("10.1.0.0/24".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.wg_subnet, "172.16.0.0/24");
+    }
+
+    // ── apply_file: wg_key_file ───────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_overrides_default_wg_key_file() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            wg_key_file: Some("/custom/wg.key".into()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.wg_key_file, PathBuf::from("/custom/wg.key"));
+    }
+
+    #[test]
+    fn apply_file_does_not_override_non_default_wg_key_file() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--wg-key-file", "/my/wg.key"]);
+        cfg.apply_file(FileConfig {
+            wg_key_file: Some("/other/wg.key".into()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.wg_key_file, PathBuf::from("/my/wg.key"));
+    }
+
+    // ── apply_file: bool flags ────────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_enables_bool_flags_from_file() {
+        let mut cfg = default_config();
+        assert!(!cfg.discovery);
+        assert!(!cfg.wireguard);
+        assert!(!cfg.raw);
+        assert!(!cfg.transparent);
+        cfg.apply_file(FileConfig {
+            discovery: Some(true),
+            wireguard: Some(true),
+            raw: Some(true),
+            transparent: Some(true),
+            ..Default::default()
+        });
+        assert!(cfg.discovery);
+        assert!(cfg.wireguard);
+        assert!(cfg.raw);
+        assert!(cfg.transparent);
+    }
+
+    #[test]
+    fn apply_file_false_does_not_disable_cli_enabled_flag() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--discovery"]);
+        assert!(cfg.discovery);
+        cfg.apply_file(FileConfig {
+            discovery: Some(false),
+            ..Default::default()
+        });
+        assert!(cfg.discovery, "CLI --discovery flag must not be overridden by file false");
+    }
+
+    #[test]
+    fn apply_file_none_does_not_change_bool_flags() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--raw"]);
+        cfg.apply_file(FileConfig::default());
+        assert!(cfg.raw, "unset file field must not disable CLI --raw");
+    }
+
+    // ── apply_file: hooks ─────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_appends_file_hooks_to_cli_hooks() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--hook", "/a.lua"]);
+        cfg.apply_file(FileConfig {
+            hooks: Some(vec!["/b.lua".into(), "/c.lua".into()]),
+            ..Default::default()
+        });
+        assert_eq!(cfg.hooks.len(), 3);
+        assert!(cfg.hooks.contains(&PathBuf::from("/a.lua")));
+        assert!(cfg.hooks.contains(&PathBuf::from("/b.lua")));
+        assert!(cfg.hooks.contains(&PathBuf::from("/c.lua")));
+    }
+
+    #[test]
+    fn apply_file_does_not_duplicate_hooks_already_in_cli() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--hook", "/a.lua"]);
+        cfg.apply_file(FileConfig {
+            hooks: Some(vec!["/a.lua".into(), "/b.lua".into()]),
+            ..Default::default()
+        });
+        assert_eq!(cfg.hooks.len(), 2, "duplicate hook /a.lua must not be added twice");
+    }
+
+    #[test]
+    fn apply_file_hooks_none_leaves_cli_hooks_unchanged() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--hook", "/a.lua"]);
+        cfg.apply_file(FileConfig::default());
+        assert_eq!(cfg.hooks, vec![PathBuf::from("/a.lua")]);
+    }
+
+    // ── apply_file: verbose ───────────────────────────────────────────────────
+
+    #[test]
+    fn apply_file_verbose_takes_file_value_when_cli_is_zero() {
+        let mut cfg = default_config();
+        assert_eq!(cfg.verbose, 0);
+        cfg.apply_file(FileConfig {
+            verbose: Some(2),
+            ..Default::default()
+        });
+        assert_eq!(cfg.verbose, 2);
+    }
+
+    #[test]
+    fn apply_file_verbose_keeps_cli_value_when_higher() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "-vvv"]);
+        assert_eq!(cfg.verbose, 3);
+        cfg.apply_file(FileConfig {
+            verbose: Some(1),
+            ..Default::default()
+        });
+        assert_eq!(cfg.verbose, 3);
+    }
+
+    #[test]
+    fn apply_file_verbose_none_leaves_cli_unchanged() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "-v"]);
+        cfg.apply_file(FileConfig::default());
+        assert_eq!(cfg.verbose, 1);
+    }
+
+    // ── dirs_or_home ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn dirs_or_home_uses_home_env_var() {
+        // Use a temp env override (not thread-safe, but single-thread tests are fine here)
+        let _orig = std::env::var("HOME");
+        unsafe { std::env::set_var("HOME", "/custom/home") };
+        let p = dirs_or_home("foo/bar.toml");
+        assert_eq!(p, PathBuf::from("/custom/home/foo/bar.toml"));
+    }
+
+    #[test]
+    fn dirs_or_home_falls_back_to_tmp_when_home_missing() {
+        let orig = std::env::var("HOME").ok();
+        unsafe { std::env::remove_var("HOME") };
+        let p = dirs_or_home("sub/file.toml");
+        assert_eq!(p, PathBuf::from("/tmp/sub/file.toml"));
+        if let Some(v) = orig {
+            unsafe { std::env::set_var("HOME", v) };
+        }
+    }
+}

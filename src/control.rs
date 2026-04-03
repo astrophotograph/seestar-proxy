@@ -1052,6 +1052,78 @@ mod tests {
         assert_eq!(v["Event"], "Ready");
     }
 
+    /// A message from the telescope that has neither an Event key nor a valid
+    /// integer id falls through to the "unknown message type" broadcast branch.
+    #[tokio::test]
+    async fn unknown_message_type_is_broadcast_to_all_clients() {
+        let (mut mock_telescope, reader) = loopback_read_half().await;
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
+        let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
+        let handshake_done = Arc::new(AtomicBool::new(false));
+
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
+
+        // A message with no id and no Event key — hits the "unknown" else branch.
+        mock_telescope
+            .write_all(b"{\"some\":\"data\",\"no_id\":true}\r\n")
+            .await
+            .unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timed out")
+            .unwrap();
+
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["some"], "data");
+    }
+
+    /// When upstream_reader_task receives multiple chunks without a newline,
+    /// it must buffer them and only process the message when the newline arrives.
+    #[tokio::test]
+    async fn upstream_reader_reassembles_chunked_messages() {
+        let (mut mock_telescope, reader) = loopback_read_half().await;
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
+        let (event_tx, mut event_rx) = broadcast::channel::<String>(16);
+        let handshake_done = Arc::new(AtomicBool::new(false));
+
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
+
+        // Send the event in two separate writes without flushing between them.
+        mock_telescope.write_all(b"{\"Event\":\"Partial").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        mock_telescope.write_all(b"Data\"}\r\n").await.unwrap();
+
+        let msg = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timed out")
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+        assert_eq!(v["Event"], "PartialData");
+    }
+
     // ── ID counter ────────────────────────────────────────────────────────────
 
     #[test]

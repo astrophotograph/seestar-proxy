@@ -529,3 +529,88 @@ async fn pending_map_rejects_overflow() {
         .expect("error response must have a 'code' field");
     assert_ne!(code, 0, "code must be non-zero to signal an error");
 }
+
+/// A notification message (no id field) is forwarded to the telescope without
+/// registering a pending entry. The telescope should receive it; the client
+/// gets no response (notifications have no reply).
+#[tokio::test]
+async fn notification_without_id_is_forwarded_to_telescope() {
+    // Use a telescope that captures what it receives.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let telescope_addr = listener.local_addr().unwrap();
+    let (received_tx, mut received_rx) = tokio::sync::mpsc::channel::<String>(8);
+
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else { return };
+        let (reader, _writer) = stream.into_split();
+        let mut reader = tokio::io::BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+            let trimmed = line.trim().to_string();
+            if !trimmed.is_empty() {
+                let _ = received_tx.send(trimmed).await;
+            }
+        }
+    });
+
+    let proxy_addr = start_proxy(telescope_addr).await;
+    let (_reader, mut writer) = connect_client(proxy_addr).await;
+
+    // Send a notification (no id field).
+    writer
+        .write_all(b"{\"method\":\"notify_something\",\"params\":[]}\r\n")
+        .await
+        .unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(2), received_rx.recv())
+        .await
+        .expect("timed out — notification was not forwarded to telescope")
+        .expect("channel closed");
+
+    let v: serde_json::Value = serde_json::from_str(&received).unwrap();
+    assert_eq!(v["method"], "notify_something");
+    assert!(v.get("id").is_none(), "notification must have no id field after forwarding");
+}
+
+/// A client that sends a request with a string id (valid JSON-RPC) gets the
+/// original string id echoed back in the response.
+#[tokio::test]
+async fn string_id_is_preserved_in_response() {
+    let telescope_addr = start_echo_telescope().await;
+    let proxy_addr = start_proxy(telescope_addr).await;
+
+    let (mut reader, mut writer) = connect_client(proxy_addr).await;
+    writer
+        .write_all(b"{\"id\":\"my-string-id\",\"method\":\"test\"}\r\n")
+        .await
+        .unwrap();
+
+    let v = read_json(&mut reader).await;
+    assert_eq!(v["id"], "my-string-id", "string id must be preserved");
+    assert_eq!(v["code"], 0);
+}
+
+/// A client that disconnects abruptly (without sending a request) should not
+/// crash the proxy — subsequent clients must still work.
+#[tokio::test]
+async fn proxy_survives_abrupt_client_disconnect() {
+    let telescope_addr = start_echo_telescope().await;
+    let proxy_addr = start_proxy(telescope_addr).await;
+
+    // Connect and immediately drop without sending anything.
+    let rude_client = TcpStream::connect(proxy_addr).await.unwrap();
+    drop(rude_client);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A normal client must still work.
+    let (mut reader, mut writer) = connect_client(proxy_addr).await;
+    writer
+        .write_all(b"{\"id\":1,\"method\":\"after_disconnect\"}\r\n")
+        .await
+        .unwrap();
+    let v = read_json(&mut reader).await;
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["code"], 0);
+}

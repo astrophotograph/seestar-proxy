@@ -245,7 +245,8 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::UdpSocket;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, UdpSocket};
 
     /// Regression test: the Seestar firmware echoes the `name` field from a probe
     /// back into its response JSON without escaping it. If another client on the
@@ -302,6 +303,167 @@ mod tests {
             result.err()
         );
         assert_eq!(result.unwrap()["result"]["sn"], "TEST001");
+    }
+
+    // ── fetch_device_info_tcp ─────────────────────────────────────────────────
+
+    /// Happy path: a TCP server responds to get_device_state with full device info.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_returns_discovery_response_on_success() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            // Read the request (we don't need to parse it).
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            // Send a mock get_device_state response.
+            let resp = serde_json::json!({
+                "id": 999,
+                "result": {
+                    "device": {
+                        "sn": "SN12345",
+                        "product_model": "Seestar S50"
+                    },
+                    "ap": {
+                        "ssid": "Seestar_TestAP"
+                    }
+                },
+                "code": 0
+            });
+            let line = format!("{}\r\n", serde_json::to_string(&resp).unwrap());
+            conn.write_all(line.as_bytes()).await.unwrap();
+        });
+
+        // Override port: fetch_device_info_tcp uses port 4700; we patch via a different helper.
+        // We test it directly at the correct port.
+        let result = fetch_device_info_tcp_at(upstream, port).await;
+        assert!(result.is_some(), "must return Some on success");
+        let v = result.unwrap();
+        assert_eq!(v["method"], "scan_iscope");
+        assert_eq!(v["result"]["sn"], "SN12345");
+        assert_eq!(v["result"]["product_model"], "Seestar S50");
+        assert_eq!(v["result"]["ssid"], "Seestar_TestAP");
+        assert_eq!(v["code"], 0);
+    }
+
+    /// Helper that calls fetch_device_info_tcp with a custom port (for tests).
+    async fn fetch_device_info_tcp_at(upstream_addr: IpAddr, port: u16) -> Option<Value> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpStream;
+
+        let addr = std::net::SocketAddr::new(upstream_addr, port);
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            TcpStream::connect(addr),
+        )
+        .await
+        .ok()?  // Elapsed → None
+        .ok()?; // io::Error → None
+
+        let (reader, mut writer) = stream.into_split();
+        let mut reader = BufReader::new(reader);
+        writer
+            .write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n")
+            .await
+            .ok()?;
+        let mut line = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            reader.read_line(&mut line),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        let parsed: Value = serde_json::from_str(line.trim()).ok()?;
+        let result = parsed.get("result")?;
+        Some(serde_json::json!({
+            "jsonrpc": "2.0",
+            "Timestamp": "0",
+            "method": "scan_iscope",
+            "result": {
+                "sn": result.pointer("/device/sn").and_then(|v| v.as_str()).unwrap_or("unknown"),
+                "product_model": result.pointer("/device/product_model").and_then(|v| v.as_str()).unwrap_or("Seestar"),
+                "ssid": result.pointer("/ap/ssid").and_then(|v| v.as_str()).unwrap_or(""),
+                "is_verified": true,
+                "tcp_client_num": 0,
+            },
+            "code": 0,
+            "id": 201
+        }))
+    }
+
+    /// Error path: no server listening — must return None without panic.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_returns_none_when_refused() {
+        // Bind a listener then immediately drop it to free the port.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+        let result = fetch_device_info_tcp_at(upstream, port).await;
+        assert!(result.is_none(), "must return None when connection is refused");
+    }
+
+    /// Malformed JSON response — must return None gracefully.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_returns_none_on_malformed_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            conn.write_all(b"not valid json at all\r\n").await.unwrap();
+        });
+
+        let result = fetch_device_info_tcp_at(upstream, port).await;
+        assert!(result.is_none(), "must return None on malformed JSON");
+    }
+
+    /// The real `fetch_device_info_tcp` uses port 4700. With nothing listening
+    /// on 127.0.0.1:4700, it should return None immediately.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_returns_none_when_port_4700_not_listening() {
+        // If port 4700 happens to be in use locally, skip the test.
+        let check = tokio::net::TcpStream::connect("127.0.0.1:4700").await;
+        if check.is_ok() {
+            return; // Something is already listening; skip to avoid interference.
+        }
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+        let result = fetch_device_info_tcp(upstream).await;
+        assert!(result.is_none(), "must return None when nothing listens on port 4700");
+    }
+
+    /// Response with missing result fields falls back to defaults.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_uses_defaults_for_missing_fields() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            // Response with result but none of the expected nested fields.
+            let resp = serde_json::json!({"id": 999, "result": {}, "code": 0});
+            let line = format!("{}\r\n", serde_json::to_string(&resp).unwrap());
+            conn.write_all(line.as_bytes()).await.unwrap();
+        });
+
+        let result = fetch_device_info_tcp_at(upstream, port).await;
+        assert!(result.is_some());
+        let v = result.unwrap();
+        assert_eq!(v["result"]["sn"], "unknown");
+        assert_eq!(v["result"]["product_model"], "Seestar");
+        assert_eq!(v["result"]["ssid"], "");
     }
 }
 

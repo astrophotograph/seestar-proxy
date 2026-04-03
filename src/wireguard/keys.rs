@@ -123,4 +123,72 @@ mod tests {
         assert_eq!(decoded.len(), 32);
         assert_eq!(&decoded[..], kp.public.as_bytes());
     }
+
+    #[test]
+    fn generate_client_keypair_returns_matching_keys() {
+        let (priv_key, pub_key) = generate_client_keypair();
+        assert_eq!(pub_key, PublicKey::from(&priv_key));
+    }
+
+    #[test]
+    fn generate_client_keypair_each_call_is_different() {
+        let (_, pub_a) = generate_client_keypair();
+        let (_, pub_b) = generate_client_keypair();
+        assert_ne!(pub_a.as_bytes(), pub_b.as_bytes(), "each keypair must be unique");
+    }
+
+    #[test]
+    fn private_key_b64_encodes_correct_bytes() {
+        let (priv_key, _) = generate_client_keypair();
+        let b64 = private_key_b64(&priv_key);
+        let decoded = BASE64_STANDARD.decode(&b64).unwrap();
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(&decoded[..], priv_key.as_bytes());
+    }
+
+    #[test]
+    fn standalone_public_key_b64_encodes_correct_bytes() {
+        let (_, pub_key) = generate_client_keypair();
+        let b64 = public_key_b64(&pub_key);
+        let decoded = BASE64_STANDARD.decode(&b64).unwrap();
+        assert_eq!(decoded.len(), 32);
+        assert_eq!(&decoded[..], pub_key.as_bytes());
+    }
+
+    #[test]
+    fn load_or_generate_rejects_key_with_wrong_byte_length() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("bad.key");
+        // Write a file with 16 bytes (too short) encoded as base64.
+        let short_b64 = BASE64_STANDARD.encode([0u8; 16]);
+        std::fs::write(&path, format!("{}\n", short_b64)).unwrap();
+
+        let result = WgKeypair::load_or_generate(&path);
+        assert!(result.is_err(), "should fail with wrong key length");
+        let err_msg = result.err().unwrap().to_string();
+        assert!(
+            err_msg.contains("32 bytes"),
+            "error message should mention 32 bytes, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn load_or_generate_rejects_corrupt_base64() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("corrupt.key");
+        std::fs::write(&path, "not-valid-base64!!!\n").unwrap();
+
+        let result = WgKeypair::load_or_generate(&path);
+        assert!(result.is_err(), "should fail on corrupt base64");
+    }
+
+    #[test]
+    fn load_or_generate_falls_back_to_ephemeral_when_dir_unwritable() {
+        // Use a path inside a nonexistent read-only location.
+        // If try_persist fails, load_or_generate should still return Ok.
+        let path = std::path::PathBuf::from("/nonexistent_root_dir/seestar/wg.key");
+        let result = WgKeypair::load_or_generate(&path);
+        assert!(result.is_ok(), "ephemeral key fallback must not propagate persist error");
+    }
 }

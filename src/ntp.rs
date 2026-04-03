@@ -74,3 +74,46 @@ fn set_system_clock(since_epoch: std::time::Duration) -> anyhow::Result<()> {
 fn set_system_clock(_since_epoch: std::time::Duration) -> anyhow::Result<()> {
     anyhow::bail!("NTP: setting system clock is not supported on this platform")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// sync() against localhost returns an error immediately (no NTP server at 127.0.0.1:123).
+    /// This covers the error path through `client.synchronize()`.
+    #[test]
+    fn sync_returns_error_when_server_unreachable() {
+        let result = sync("127.0.0.1");
+        assert!(result.is_err(), "sync must fail when no NTP server is running");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("NTP query failed"),
+            "error must say 'NTP query failed', got: {}",
+            msg
+        );
+    }
+
+    /// Exercises the error path inside set_system_clock on unix (requires root / CAP_SYS_TIME).
+    /// In the test environment we're not root, so clock_settime returns EPERM.
+    #[cfg(unix)]
+    #[test]
+    fn set_system_clock_fails_without_root_privileges() {
+        // Use a known-valid time (year 2024) — the call will fail with EPERM, not an argument error.
+        let duration = std::time::Duration::from_secs(1_700_000_000);
+        let result = set_system_clock(duration);
+        // If we happen to be root (e.g. Docker), this might succeed — that's also fine.
+        if result.is_err() {
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("clock_settime failed"),
+                "error must mention clock_settime, got: {}",
+                msg
+            );
+        }
+    }
+
+    #[test]
+    fn drift_threshold_is_positive() {
+        assert!(DRIFT_THRESHOLD_SECS > 0.0);
+    }
+}

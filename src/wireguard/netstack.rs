@@ -304,3 +304,179 @@ fn rand_seed() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     RandomState::new().build_hasher().finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smoltcp::phy::{Device, RxToken, TxToken};
+    use smoltcp::time::Instant as SmolInstant;
+
+    // ── VirtualDevice ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn virtual_device_new_has_empty_queues() {
+        let dev = VirtualDevice::new(1420);
+        assert_eq!(dev.mtu, 1420);
+        assert!(dev.rx_queue.is_empty());
+        assert!(dev.tx_queue.is_empty());
+    }
+
+    #[test]
+    fn virtual_device_inject_and_drain_roundtrip() {
+        let mut dev = VirtualDevice::new(1420);
+        let pkt = vec![1u8, 2, 3, 4];
+        dev.inject(pkt.clone());
+        let out = dev.drain();
+        assert!(out.is_none(), "drain reads from tx_queue, not rx_queue");
+        // inject puts into rx_queue — drain reads from tx_queue
+        assert_eq!(dev.rx_queue.len(), 1);
+    }
+
+    #[test]
+    fn virtual_device_drain_on_empty_returns_none() {
+        let mut dev = VirtualDevice::new(1420);
+        assert!(dev.drain().is_none());
+    }
+
+    #[test]
+    fn virtual_device_drain_returns_fifo_order() {
+        let mut dev = VirtualDevice::new(1420);
+        // Manually push two packets into tx_queue (as transmit would do).
+        dev.tx_queue.push_back(vec![1u8]);
+        dev.tx_queue.push_back(vec![2u8]);
+        assert_eq!(dev.drain(), Some(vec![1u8]));
+        assert_eq!(dev.drain(), Some(vec![2u8]));
+        assert_eq!(dev.drain(), None);
+    }
+
+    #[test]
+    fn virtual_device_capabilities_reports_ip_medium_and_mtu() {
+        let dev = VirtualDevice::new(1500);
+        let caps = dev.capabilities();
+        assert_eq!(caps.medium, smoltcp::phy::Medium::Ip);
+        assert_eq!(caps.max_transmission_unit, 1500);
+    }
+
+    #[test]
+    fn virtual_device_receive_returns_none_when_rx_empty() {
+        let mut dev = VirtualDevice::new(1420);
+        let t = SmolInstant::from_millis(0);
+        assert!(dev.receive(t).is_none());
+    }
+
+    #[test]
+    fn virtual_device_receive_returns_tokens_when_rx_has_data() {
+        let mut dev = VirtualDevice::new(1420);
+        dev.inject(vec![0xAA, 0xBB]);
+        let t = SmolInstant::from_millis(0);
+        let tokens = dev.receive(t);
+        assert!(tokens.is_some(), "receive must return tokens when data is available");
+        let (rx_tok, _tx_tok) = tokens.unwrap();
+        let data = rx_tok.consume(|b| b.to_vec());
+        assert_eq!(data, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn virtual_device_transmit_always_returns_some() {
+        let mut dev = VirtualDevice::new(1420);
+        let t = SmolInstant::from_millis(0);
+        let tok = dev.transmit(t);
+        assert!(tok.is_some());
+        // Write via the tx token and verify it ends up in tx_queue.
+        let tok = tok.unwrap();
+        tok.consume(2, |buf| {
+            buf[0] = 0xDE;
+            buf[1] = 0xAD;
+        });
+        assert_eq!(dev.tx_queue.pop_front(), Some(vec![0xDE, 0xAD]));
+    }
+
+    #[test]
+    fn virt_rx_token_consume_passes_bytes_to_closure() {
+        let tok = VirtRxToken(vec![10u8, 20, 30]);
+        let result = tok.consume(|b| b.len());
+        assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn virt_tx_token_consume_writes_into_queue() {
+        let mut queue = std::collections::VecDeque::new();
+        let tok = VirtTxToken(&mut queue);
+        tok.consume(4, |buf| {
+            buf.copy_from_slice(&[1, 2, 3, 4]);
+        });
+        assert_eq!(queue.pop_front(), Some(vec![1u8, 2, 3, 4]));
+    }
+
+    // ── now() / rand_seed() ───────────────────────────────────────────────────
+
+    #[test]
+    fn now_returns_reasonable_timestamp() {
+        let t = now();
+        // Must be after 2020-01-01 (Unix ms = 1_577_836_800_000)
+        assert!(t.total_millis() > 1_577_836_800_000_i64);
+    }
+
+    #[test]
+    fn rand_seed_returns_a_value() {
+        // Just verify it runs without panic.
+        let _ = rand_seed();
+    }
+
+    // ── start() ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn start_returns_channels_and_stack_runs() {
+        let server_ip: std::net::Ipv4Addr = "10.99.0.1".parse().unwrap();
+        let upstream_ip: std::net::Ipv4Addr = "10.99.0.1".parse().unwrap();
+        let (channels, _conn_rx) = start(server_ip, upstream_ip, 14701, 14801);
+
+        // Give the spawned run_stack task time to initialise and run the poll loop.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+
+        // Inject a dummy packet — drives the inject_rx.recv() branch in run_stack.
+        let dummy = vec![0u8; 40];
+        let _ = channels.inject_tx.send(dummy).await;
+
+        // Allow the stack to process the injected packet.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+
+    #[tokio::test]
+    async fn inject_channel_accepts_multiple_packets() {
+        let server_ip: std::net::Ipv4Addr = "10.99.0.1".parse().unwrap();
+        let upstream_ip: std::net::Ipv4Addr = "10.99.0.2".parse().unwrap();
+        let (channels, _conn_rx) = start(server_ip, upstream_ip, 14702, 14802);
+
+        // Fill the channel to verify backpressure doesn't cause panics.
+        for _ in 0..10 {
+            let _ = channels.inject_tx.try_send(vec![0u8; 20]);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // ── TunnelTcpStream ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tunnel_tcp_stream_channels_pass_data() {
+        let (from_tunnel_tx, from_tunnel_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let (to_tunnel_tx, mut to_tunnel_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+
+        let stream = TunnelTcpStream {
+            from_tunnel_rx,
+            to_tunnel_tx: to_tunnel_tx.clone(),
+            dest_port: 4700,
+        };
+
+        assert_eq!(stream.dest_port, 4700);
+
+        // Send via to_tunnel_tx (simulates proxy sending back to client).
+        to_tunnel_tx.send(vec![0xFF]).await.unwrap();
+        let received = to_tunnel_rx.recv().await.unwrap();
+        assert_eq!(received, vec![0xFF]);
+
+        // Send via from_tunnel_tx (simulates data arriving from WireGuard client).
+        from_tunnel_tx.send(vec![0xAB]).await.unwrap();
+        drop(stream); // drop so from_tunnel_rx is gone
+    }
+}

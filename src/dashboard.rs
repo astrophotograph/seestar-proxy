@@ -842,4 +842,184 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 404);
     }
+
+    // ── WireGuard endpoints (disabled) ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn wg_config_returns_404_when_not_enabled() {
+        let app = test_app(Metrics::new());
+        let response = app
+            .oneshot(Request::get("/api/wg-config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn wg_qr_returns_404_when_not_enabled() {
+        let app = test_app(Metrics::new());
+        let response = app
+            .oneshot(Request::get("/api/wg-qr").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+    }
+
+    // ── WireGuard endpoints (enabled) ─────────────────────────────────────────
+
+    fn test_app_with_wg(metrics: Arc<Metrics>) -> Router {
+        let state = DashboardState {
+            metrics,
+            wg_config: Some("[Interface]\nPrivateKey = abc\n".to_string()),
+            wg_qr_svg: Some("<svg>test</svg>".to_string()),
+            wg_enabled: true,
+            wg_endpoint: Some("mypi.example.com:51820".to_string()),
+        };
+        Router::new()
+            .route("/", get(root))
+            .route("/api/stream", get(sse_handler))
+            .route("/api/stats", get(stats_handler))
+            .route("/api/wg-config", get(wg_config_handler))
+            .route("/api/wg-qr", get(wg_qr_handler))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn wg_config_returns_text_when_enabled() {
+        let app = test_app_with_wg(Metrics::new());
+        let response = app
+            .oneshot(Request::get("/api/wg-config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("text/plain"), "expected text/plain, got: {}", ct);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"[Interface]"));
+    }
+
+    #[tokio::test]
+    async fn wg_config_returns_404_for_empty_config() {
+        let state = DashboardState {
+            metrics: Metrics::new(),
+            wg_config: None,
+            wg_qr_svg: None,
+            wg_enabled: true, // enabled flag, but no config loaded yet
+            wg_endpoint: None,
+        };
+        let app = Router::new()
+            .route("/api/wg-config", get(wg_config_handler))
+            .with_state(state);
+        let response = app
+            .oneshot(Request::get("/api/wg-config").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn wg_qr_returns_svg_when_enabled() {
+        let app = test_app_with_wg(Metrics::new());
+        let response = app
+            .oneshot(Request::get("/api/wg-qr").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        assert!(ct.contains("image/svg+xml"), "expected image/svg+xml, got: {}", ct);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.starts_with(b"<svg>"));
+    }
+
+    #[tokio::test]
+    async fn wg_qr_returns_404_for_empty_svg() {
+        let state = DashboardState {
+            metrics: Metrics::new(),
+            wg_config: None,
+            wg_qr_svg: None,
+            wg_enabled: true,
+            wg_endpoint: None,
+        };
+        let app = Router::new()
+            .route("/api/wg-qr", get(wg_qr_handler))
+            .with_state(state);
+        let response = app
+            .oneshot(Request::get("/api/wg-qr").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn root_with_wg_enabled_injects_wg_section() {
+        let app = test_app_with_wg(Metrics::new());
+        let response = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(html.contains("WireGuard Tunnel"), "WG section should appear in HTML");
+        assert!(html.contains("mypi.example.com:51820"), "endpoint must appear in HTML");
+        assert!(html.contains("[Interface]"), "config must appear in HTML");
+        assert!(html.contains("<svg>"), "QR SVG must appear in HTML");
+    }
+
+    /// run() binds a real TCP listener — verify the port is reachable.
+    #[tokio::test]
+    async fn run_binds_and_accepts_connections() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Mimic what run_with_state does — serve the app from a background task.
+        let m = Metrics::new();
+        let state = DashboardState {
+            metrics: m,
+            wg_config: None,
+            wg_qr_svg: None,
+            wg_enabled: false,
+            wg_endpoint: None,
+        };
+        let app = Router::new()
+            .route("/api/stats", get(stats_handler))
+            .with_state(state);
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // Give the server a moment to start.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // Make a raw HTTP/1.1 GET request.
+        let mut conn = TcpStream::connect(addr).await.unwrap();
+        conn.write_all(b"GET /api/stats HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp = String::new();
+        conn.read_to_string(&mut resp).await.unwrap();
+        server_task.abort();
+
+        assert!(resp.starts_with("HTTP/1.1 200"), "expected 200 OK, got: {}", &resp[..resp.len().min(40)]);
+        assert!(resp.contains("control_rx"), "response must contain stats JSON");
+    }
+
+    #[tokio::test]
+    async fn root_without_wg_does_not_inject_wg_section() {
+        let app = test_app(Metrics::new());
+        let response = app
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(
+            !html.contains("WireGuard Tunnel"),
+            "WG section must NOT appear when wg_enabled=false"
+        );
+    }
 }

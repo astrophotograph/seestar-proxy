@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  COVERAGE_THRESHOLD: 60
+  COVERAGE_THRESHOLD: 75
 
 jobs:
   coverage:

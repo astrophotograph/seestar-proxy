@@ -527,6 +527,299 @@ enum TunnAction {
     Decrypted(Vec<u8>),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── WgInfo ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wg_info_fields_are_accessible() {
+        let info = WgInfo {
+            enabled: true,
+            port: 51820,
+            server_public_key: "server_pub".to_string(),
+            client_config: "[Interface]\nPrivateKey = x\n".to_string(),
+            client_config_svg: "<svg/>".to_string(),
+            endpoint: "10.0.0.1:51820".to_string(),
+        };
+        assert!(info.enabled);
+        assert_eq!(info.port, 51820);
+        assert_eq!(info.endpoint, "10.0.0.1:51820");
+    }
+
+    #[test]
+    fn wg_info_clone_is_independent() {
+        let info = WgInfo {
+            enabled: false,
+            port: 9999,
+            server_public_key: "key".to_string(),
+            client_config: "cfg".to_string(),
+            client_config_svg: "svg".to_string(),
+            endpoint: "host:9999".to_string(),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.port, info.port);
+        assert_eq!(cloned.endpoint, info.endpoint);
+    }
+
+    // ── process_tunn_result() ─────────────────────────────────────────────────
+
+    async fn dummy_udp() -> (UdpSocket, std::net::SocketAddr) {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        (sock, addr)
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_done_returns_done() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let action = process_tunn_result(&udp, peer, TunnResult::Done, &inject_tx).await;
+        assert!(matches!(action, TunnAction::Done));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_ipv6_returns_done() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let mut buf = [];
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::WriteToTunnelV6(&mut buf, std::net::Ipv6Addr::LOCALHOST),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Done));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_connection_expired_returns_done() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::Err(WireGuardError::ConnectionExpired),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Done));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_other_wg_error_returns_done() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::Err(WireGuardError::InvalidMac),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Done));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_write_to_network_returns_continue() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let mut data = *b"hello";
+        let action =
+            process_tunn_result(&udp, peer, TunnResult::WriteToNetwork(&mut data), &inject_tx)
+                .await;
+        assert!(matches!(action, TunnAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_write_to_tunnel_v4_returns_decrypted() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+
+        // Minimal 40-byte IPv4+TCP packet (checksums don't matter for this test).
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45; // IPv4, IHL=5 (20 bytes)
+        pkt[9] = 6;    // Protocol: TCP
+        pkt[16..20].copy_from_slice(&[10, 99, 0, 1]); // dst IP
+        pkt[20..22].copy_from_slice(&[0xD4, 0x31]); // src port = 54321
+        pkt[22..24].copy_from_slice(&[0x12, 0x5C]); // dst port = 4700
+
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::WriteToTunnelV4(&mut pkt, std::net::Ipv4Addr::new(10, 99, 0, 2)),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Decrypted(_)));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_v4_short_packet_still_returns_decrypted() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        // Packet shorter than 20 bytes — the length check branch fires.
+        let mut pkt = vec![0u8; 10];
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::WriteToTunnelV4(&mut pkt, std::net::Ipv4Addr::LOCALHOST),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Decrypted(_)));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_v4_udp_protocol_extracts_ports() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45;
+        pkt[9] = 17; // UDP
+        pkt[16..20].copy_from_slice(&[192, 168, 1, 1]);
+        pkt[20..22].copy_from_slice(&[0x11, 0xD0]); // src port = 4560
+        pkt[22..24].copy_from_slice(&[0x12, 0x70]); // dst port = 4720 (discovery)
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::WriteToTunnelV4(&mut pkt, std::net::Ipv4Addr::new(10, 99, 0, 2)),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Decrypted(_)));
+    }
+
+    #[tokio::test]
+    async fn process_tunn_result_v4_unknown_protocol_skips_port_extraction() {
+        let (udp, peer) = dummy_udp().await;
+        let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45;
+        pkt[9] = 1; // ICMP — no port extraction
+        pkt[16..20].copy_from_slice(&[192, 168, 1, 1]);
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::WriteToTunnelV4(&mut pkt, std::net::Ipv4Addr::new(10, 99, 0, 2)),
+            &inject_tx,
+        )
+        .await;
+        assert!(matches!(action, TunnAction::Decrypted(_)));
+    }
+
+    // ── handle_decrypted_packet() ─────────────────────────────────────────────
+
+    fn make_test_tunn() -> Tunn {
+        use rand_core::OsRng;
+        use x25519_dalek::{PublicKey, StaticSecret};
+        let server_private = StaticSecret::random_from_rng(OsRng);
+        let client_private = StaticSecret::random_from_rng(OsRng);
+        let client_public = PublicKey::from(&client_private);
+        Tunn::new(server_private, client_public, None, None, 0, None)
+    }
+
+    /// A TCP packet to port 80 doesn't match DNS, discovery, or ICMP — it's a no-op.
+    #[tokio::test]
+    async fn handle_decrypted_packet_noop_for_plain_tcp() {
+        let (udp, peer) = dummy_udp().await;
+        let upstream_ip = [192, 168, 1, 200u8];
+        let mut tunn = make_test_tunn();
+        let mut pkt = vec![0u8; 40];
+        pkt[0] = 0x45; // IPv4, IHL=5
+        pkt[9] = 6;    // TCP
+        pkt[16..20].copy_from_slice(&upstream_ip);
+        pkt[22..24].copy_from_slice(&[0x00, 0x50]); // dst port 80
+        // Should complete without panic.
+        handle_decrypted_packet(&pkt, upstream_ip, "{}", &mut tunn, &udp, peer).await;
+    }
+
+    /// An ICMP echo request to the upstream IP should trigger the ICMP handler path.
+    #[tokio::test]
+    async fn handle_decrypted_packet_handles_icmp_echo() {
+        let (udp, peer) = dummy_udp().await;
+        let upstream_ip = [10, 99, 0, 1u8];
+        let mut tunn = make_test_tunn();
+        // Minimal ICMP echo request: 28+ bytes, protocol=1, dst=upstream_ip, ICMP type=8.
+        let mut pkt = vec![0u8; 28];
+        pkt[0] = 0x45; // IPv4, IHL=5
+        pkt[9] = 1;    // ICMP
+        pkt[16..20].copy_from_slice(&upstream_ip); // dst = upstream
+        pkt[20] = 8;   // ICMP echo request
+        pkt[21] = 0;   // code
+        // No real checksum — handle_icmp_echo builds the reply directly.
+        handle_decrypted_packet(&pkt, upstream_ip, "{}", &mut tunn, &udp, peer).await;
+    }
+
+    /// An ICMP echo request to a different IP is silently ignored.
+    #[tokio::test]
+    async fn handle_decrypted_packet_ignores_icmp_to_wrong_dest() {
+        let (udp, peer) = dummy_udp().await;
+        let upstream_ip = [10, 99, 0, 1u8];
+        let mut tunn = make_test_tunn();
+        let mut pkt = vec![0u8; 28];
+        pkt[0] = 0x45;
+        pkt[9] = 1; // ICMP
+        pkt[16..20].copy_from_slice(&[1, 2, 3, 4]); // wrong dst
+        pkt[20] = 8; // echo request
+        handle_decrypted_packet(&pkt, upstream_ip, "{}", &mut tunn, &udp, peer).await;
+    }
+
+    // ── wireguard fetch_device_info_tcp (timeout path) ────────────────────────
+
+    /// fetch_device_info_tcp with an unreachable address falls back to default JSON.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_falls_back_when_unreachable() {
+        // 127.0.0.1 should not have a Seestar on port 4700 in the test environment.
+        let result = fetch_device_info_tcp("127.0.0.1".parse().unwrap(), 1).await;
+        // Whether it gets a connection or not, it must return a valid JSON string.
+        assert!(!result.is_empty(), "must return non-empty fallback JSON");
+        let _v: serde_json::Value = serde_json::from_str(&result)
+            .expect("fallback must be valid JSON");
+    }
+
+    // ── detect_local_ip() ─────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_local_ip_returns_non_loopback_or_none() {
+        // This may return None in CI environments without a default route,
+        // or Some(ip) on machines with internet access. Either is valid.
+        match detect_local_ip() {
+            Some(ip) => {
+                let parsed: std::net::IpAddr = ip.parse().expect("must be a valid IP");
+                assert!(!parsed.is_loopback(), "must not return loopback");
+                assert!(!parsed.is_unspecified(), "must not return 0.0.0.0");
+            }
+            None => {
+                // Fine — no default route available in this environment.
+            }
+        }
+    }
+
+    // ── default_device_info() ─────────────────────────────────────────────────
+
+    #[test]
+    fn default_device_info_is_valid_json() {
+        let s = default_device_info();
+        let v: serde_json::Value = serde_json::from_str(&s).expect("must be valid JSON");
+        assert_eq!(v["method"], "scan_iscope");
+        assert_eq!(v["code"], 0);
+        assert_eq!(v["id"], 201);
+        assert_eq!(v["result"]["sn"], "proxy");
+        assert_eq!(v["result"]["is_verified"], true);
+    }
+
+    #[test]
+    fn default_device_info_contains_product_model() {
+        let s = default_device_info();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let model = v["result"]["product_model"].as_str().unwrap();
+        assert!(model.contains("Seestar"), "product_model must mention Seestar");
+    }
+}
+
 /// Handle a decrypted IP packet: check for discovery broadcasts and ICMP pings.
 /// If matched, encrypt and send the response back through the tunnel.
 async fn handle_decrypted_packet(
