@@ -2,9 +2,8 @@
 # Installs Go in the cross Docker container since libtailscale-sys
 # needs it to compile the Go runtime.
 #
-# These targets are only used for Tailscale-enabled builds.
-# The default (non-Tailscale) ARM builds use musl targets which
-# don't need this config.
+# NOTE: Only glibc targets are listed here. The default musl ARM builds
+# don't use these targets, so this config doesn't affect them.
 
 [target.armv7-unknown-linux-gnueabihf]
 pre-build = [
@@ -15,11 +14,6 @@ pre-build = [
     "mkdir -p /tmp/go-cache /tmp/go-path/pkg/mod && chmod -R 777 /tmp/go-cache /tmp/go-path",
 ]
 
-[target.armv7-unknown-linux-gnueabihf.env]
-GOPATH = { value = "/tmp/go-path" }
-GOCACHE = { value = "/tmp/go-cache" }
-GOMODCACHE = { value = "/tmp/go-path/pkg/mod" }
-
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
     "apt-get update && apt-get install -y wget",
@@ -28,8 +22,3 @@ pre-build = [
     "ln -s /usr/local/go/bin/go /usr/local/bin/go",
     "mkdir -p /tmp/go-cache /tmp/go-path/pkg/mod && chmod -R 777 /tmp/go-cache /tmp/go-path",
 ]
-
-[target.aarch64-unknown-linux-gnu.env]
-GOPATH = { value = "/tmp/go-path" }
-GOCACHE = { value = "/tmp/go-cache" }
-GOMODCACHE = { value = "/tmp/go-path/pkg/mod" }

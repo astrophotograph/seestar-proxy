@@ -151,6 +151,8 @@ jobs:
       - name: Build (cross)
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }} ${{ matrix.features }}
+        env:
+          CROSS_CONTAINER_OPTS: "${{ matrix.suffix == '-tailscale' && '-e GOPATH=/tmp/go-path -e GOCACHE=/tmp/go-cache -e GOMODCACHE=/tmp/go-path/pkg/mod' || '' }}"
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
