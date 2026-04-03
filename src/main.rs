@@ -159,7 +159,47 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Spawn dashboard (after WireGuard so it can include QR code).
+    // Start embedded Tailscale node if enabled.
+    #[cfg(feature = "tailscale")]
+    let _ts_info = if config.tailscale {
+        // Create state directory if needed.
+        if let Err(e) = std::fs::create_dir_all(&config.ts_state_dir) {
+            warn!("Could not create Tailscale state dir {}: {}", config.ts_state_dir.display(), e);
+        }
+        match seestar_proxy::tailscale::start(
+            &config.ts_hostname,
+            config.ts_authkey.as_deref(),
+            &config.ts_state_dir,
+            config.ts_control_url.as_deref(),
+            config.control_port,
+            config.imaging_port,
+        )
+        .await
+        {
+            Ok(info) => {
+                if let Some(ref ip) = info.node_ip {
+                    println!(
+                        "  Tailscale:  {}:{} (control), {}:{} (imaging)",
+                        ip, config.control_port, ip, config.imaging_port
+                    );
+                } else {
+                    println!("  Tailscale:  {} (waiting for IP)", info.hostname);
+                }
+                Some(info)
+            }
+            Err(e) => {
+                error!("Failed to start Tailscale: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // (When tailscale feature is disabled, the --tailscale flag doesn't exist in Config,
+    // so no runtime check is needed.)
+
+    // Spawn dashboard (after WireGuard/Tailscale so it can include their info).
     let dashboard_handle = if config.dashboard_port != 0 {
         let bind_dash = std::net::SocketAddr::new(config.bind, config.dashboard_port);
         let display_host = if config.bind.is_unspecified() { "localhost".to_string() } else { config.bind.to_string() };

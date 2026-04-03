@@ -872,6 +872,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
+name = "libtailscale"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1db18f9410fcf7b09c9cf4ce2338f9a5e7912fb5bc37c776c023078ec1f5558"
+dependencies = [
+ "libc",
+ "libtailscale-sys",
+]
+
+[[package]]
+name = "libtailscale-sys"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0285ec5d2b6a8ef32b87055a85447f47c05264108e598ffcd33fc122ca9850a0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1265,6 +1284,7 @@ dependencies = [
  "clap",
  "futures-util",
  "libc",
+ "libtailscale",
  "mlua",
  "qrcode",
  "rand_core",

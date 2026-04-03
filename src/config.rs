@@ -97,6 +97,26 @@ pub struct Config {
     #[arg(long, env = "SEESTAR_TAILSCALE")]
     pub tailscale: bool,
 
+    /// Tailscale hostname (how this node appears on the tailnet)
+    #[cfg(feature = "tailscale")]
+    #[arg(long, default_value = "seestar-proxy", env = "SEESTAR_TS_HOSTNAME")]
+    pub ts_hostname: String,
+
+    /// Tailscale auth key (for headless/automated setup; omit for interactive browser auth)
+    #[cfg(feature = "tailscale")]
+    #[arg(long, env = "SEESTAR_TS_AUTHKEY")]
+    pub ts_authkey: Option<String>,
+
+    /// Tailscale state directory
+    #[cfg(feature = "tailscale")]
+    #[arg(long, default_value = "/var/lib/seestar-proxy/tailscale", env = "SEESTAR_TS_STATE_DIR")]
+    pub ts_state_dir: PathBuf,
+
+    /// Tailscale control server URL (for Headscale users)
+    #[cfg(feature = "tailscale")]
+    #[arg(long, env = "SEESTAR_TS_CONTROL_URL")]
+    pub ts_control_url: Option<String>,
+
     /// HTTP dashboard port (0 = disable)
     #[arg(long, default_value = "4090", env = "SEESTAR_DASHBOARD_PORT")]
     pub dashboard_port: u16,

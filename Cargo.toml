@@ -29,12 +29,15 @@ rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 socket2 = { version = "0.6.3", features = ["all"] }
 libc = "0.2"
 
+# Embedded Tailscale node (feature-gated)
+libtailscale = { version = "0.2", optional = true }
+
 [features]
 default = ["wireguard", "luajit"]
 luajit = ["mlua/luajit"]
 lua54 = ["mlua/lua54"]
 wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:rand_core"]
-tailscale = []
+tailscale = ["dep:libtailscale"]
 
 [dev-dependencies]
 tower = "0.5"
