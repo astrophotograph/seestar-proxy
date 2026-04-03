@@ -17,13 +17,24 @@ jobs:
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
 
-      - name: Check
-        run: cargo check
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
         run: cargo clippy -- -D warnings
+        env:
+          RUSTC_WRAPPER: sccache
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+
+      - name: Install nextest
+        run: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
 
       - name: Test
-        run: cargo test
+        run: cargo nextest run
+        env:
+          RUSTC_WRAPPER: sccache
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"

@@ -45,7 +45,7 @@ jobs:
           echo "Release version: $VERSION"
 
   build:
-    name: Build (${{ matrix.target }})
+    name: Build (${{ matrix.target }}${{ matrix.suffix }})
     needs: determine-version
     strategy:
       fail-fast: false
@@ -109,6 +109,14 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.23'
+          cache: true
+
+      - name: Install mold linker (Linux)
+        if: runner.os == 'Linux' && !matrix.use_cross
+        run: sudo apt-get install -y mold
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        if: "!matrix.use_cross"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -116,7 +124,9 @@ jobs:
 
       - name: Install cross
         if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: |
+          curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C /usr/local/bin
 
       - name: Build (cross)
         if: matrix.use_cross
@@ -129,6 +139,9 @@ jobs:
       - name: Build (native)
         if: "!matrix.use_cross"
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+        env:
+          RUSTC_WRAPPER: sccache
+          RUSTFLAGS: "${{ runner.os == 'Linux' && '-C linker=clang -C link-arg=-fuse-ld=mold' || '' }}"
 
       - name: Rename binary
         shell: bash
@@ -200,10 +213,10 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir release
-          for dir in artifacts/seestar-proxy-*/; do
+          for dir in artifacts/seestar-proxy*/; do
             cp "$dir"/* release/
           done
-          chmod +x release/seestar-proxy-*
+          chmod +x release/seestar-proxy*
           ls -lh release/
 
       - name: Create release
