@@ -31,7 +31,10 @@ pub fn sync(server: &str) -> anyhow::Result<Option<f64>> {
     );
 
     if offset_secs.abs() < DRIFT_THRESHOLD_SECS {
-        info!("NTP: clock is within {:.0}s threshold, no correction needed", DRIFT_THRESHOLD_SECS);
+        info!(
+            "NTP: clock is within {:.0}s threshold, no correction needed",
+            DRIFT_THRESHOLD_SECS
+        );
         return Ok(None);
     }
 
@@ -47,10 +50,7 @@ pub fn sync(server: &str) -> anyhow::Result<Option<f64>> {
 
     set_system_clock(duration)?;
 
-    info!(
-        "NTP: system clock adjusted by {:.3}s",
-        offset_secs
-    );
+    info!("NTP: system clock adjusted by {:.3}s", offset_secs);
 
     Ok(Some(offset_secs))
 }

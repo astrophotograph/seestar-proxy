@@ -58,7 +58,13 @@ mod tests {
 
     #[test]
     fn client_config_has_all_fields() {
-        let config = client_config("PRIVKEY", "10.99.0.2/24", "PUBKEY", "1.2.3.4:51820", "10.0.0.0/24");
+        let config = client_config(
+            "PRIVKEY",
+            "10.99.0.2/24",
+            "PUBKEY",
+            "1.2.3.4:51820",
+            "10.0.0.0/24",
+        );
         assert!(config.contains("PrivateKey = PRIVKEY"));
         assert!(config.contains("Address = 10.99.0.2/24"));
         assert!(config.contains("PublicKey = PUBKEY"));

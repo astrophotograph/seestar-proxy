@@ -120,10 +120,10 @@ pub async fn start(
     let tunn = Tunn::new(
         server_keys.private.clone(),
         client_public,
-        None,   // preshared key
-        None,   // keepalive interval (client sets this)
-        0,      // tunnel index
-        None,   // rate limiter
+        None, // preshared key
+        None, // keepalive interval (client sets this)
+        0,    // tunnel index
+        None, // rate limiter
     );
 
     // Bind UDP socket.
@@ -162,7 +162,13 @@ pub async fn start(
     let device_info_json = fetch_device_info(upstream_ip, upstream_control_port).await;
 
     // Spawn the packet processing loop with netstack + discovery injection.
-    tokio::spawn(packet_loop(udp, tunn, net_channels, upstream_v4.octets(), device_info_json));
+    tokio::spawn(packet_loop(
+        udp,
+        tunn,
+        net_channels,
+        upstream_v4.octets(),
+        device_info_json,
+    ));
 
     Ok(wg_info)
 }
@@ -193,13 +199,21 @@ async fn fetch_device_info(upstream_ip: std::net::IpAddr, _control_port: u16) ->
                 return Ok::<String, anyhow::Error>(response);
             }
         }
-    }).await {
+    })
+    .await
+    {
         Ok(Ok(response)) => {
-            info!("Cached native discovery response: {}", &response[..response.len().min(200)]);
+            info!(
+                "Cached native discovery response: {}",
+                &response[..response.len().min(200)]
+            );
             response
         }
         _ => {
-            warn!("Discovery probe to {} timed out, building response from get_device_state", upstream_ip);
+            warn!(
+                "Discovery probe to {} timed out, building response from get_device_state",
+                upstream_ip
+            );
             // Fallback: try TCP get_device_state.
             fetch_device_info_tcp(upstream_ip, _control_port).await
         }
@@ -216,14 +230,21 @@ async fn fetch_device_info_tcp(upstream_ip: std::net::IpAddr, control_port: u16)
         let stream = TcpStream::connect(addr).await?;
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
-        writer.write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n").await?;
+        writer
+            .write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n")
+            .await?;
         let mut line = String::new();
         reader.read_line(&mut line).await?;
         Ok::<String, anyhow::Error>(line)
-    }).await {
+    })
+    .await
+    {
         Ok(Ok(response)) => {
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(response.trim()) {
-                let result = parsed.get("result").cloned().unwrap_or(serde_json::json!({}));
+                let result = parsed
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
                 let discovery_response = serde_json::json!({
                     "jsonrpc": "2.0",
                     "Timestamp": "0",
@@ -238,7 +259,10 @@ async fn fetch_device_info_tcp(upstream_ip: std::net::IpAddr, control_port: u16)
                     "code": 0,
                     "id": 201
                 });
-                info!("Built discovery response from device state: {}", discovery_response);
+                info!(
+                    "Built discovery response from device state: {}",
+                    discovery_response
+                );
                 serde_json::to_string(&discovery_response).unwrap_or_default()
             } else {
                 default_device_info()
@@ -281,7 +305,8 @@ fn default_device_info() -> String {
         },
         "code": 0,
         "id": 201
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Main packet processing loop.
@@ -445,15 +470,26 @@ async fn process_tunn_result(
                     debug!(
                         "WireGuard decrypted: {} {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} ({} bytes)",
                         proto_name,
-                        data[12], data[13], data[14], data[15], src_port,
-                        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], dst_port,
+                        data[12],
+                        data[13],
+                        data[14],
+                        data[15],
+                        src_port,
+                        dst_ip[0],
+                        dst_ip[1],
+                        dst_ip[2],
+                        dst_ip[3],
+                        dst_port,
                         data.len()
                     );
                 } else {
                     debug!(
                         "WireGuard decrypted: {} -> {}.{}.{}.{} ({} bytes)",
                         proto_name,
-                        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3],
+                        dst_ip[0],
+                        dst_ip[1],
+                        dst_ip[2],
+                        dst_ip[3],
                         data.len()
                     );
                 }

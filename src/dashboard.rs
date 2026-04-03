@@ -7,19 +7,19 @@
 
 use crate::metrics::Metrics;
 use axum::{
+    Router,
     extract::State,
     response::{
-        sse::{Event, KeepAlive},
         Html, IntoResponse, Sse,
+        sse::{Event, KeepAlive},
     },
     routing::get,
-    Router,
 };
 use futures_util::stream;
 use serde_json::json;
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use tracing::info;
 
@@ -522,27 +522,17 @@ async fn root(State(ds): State<DashboardState>) -> Html<String> {
 
 async fn wg_config_handler(State(ds): State<DashboardState>) -> impl IntoResponse {
     match ds.wg_config {
-        Some(config) => (
-            [(axum::http::header::CONTENT_TYPE, "text/plain")],
-            config,
-        ).into_response(),
-        None => (
-            axum::http::StatusCode::NOT_FOUND,
-            "WireGuard not enabled",
-        ).into_response(),
+        Some(config) => {
+            ([(axum::http::header::CONTENT_TYPE, "text/plain")], config).into_response()
+        }
+        None => (axum::http::StatusCode::NOT_FOUND, "WireGuard not enabled").into_response(),
     }
 }
 
 async fn wg_qr_handler(State(ds): State<DashboardState>) -> impl IntoResponse {
     match ds.wg_qr_svg {
-        Some(svg) => (
-            [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
-            svg,
-        ).into_response(),
-        None => (
-            axum::http::StatusCode::NOT_FOUND,
-            "WireGuard not enabled",
-        ).into_response(),
+        Some(svg) => ([(axum::http::header::CONTENT_TYPE, "image/svg+xml")], svg).into_response(),
+        None => (axum::http::StatusCode::NOT_FOUND, "WireGuard not enabled").into_response(),
     }
 }
 
@@ -583,9 +573,12 @@ async fn sse_handler(
         s.last_tick = now;
 
         let entries = s.metrics.log_since(s.next_log_seq);
-        s.next_log_seq = Some(entries.last().map(|e| e.seq + 1).unwrap_or(
-            s.next_log_seq.unwrap_or(0),
-        ));
+        s.next_log_seq = Some(
+            entries
+                .last()
+                .map(|e| e.seq + 1)
+                .unwrap_or(s.next_log_seq.unwrap_or(0)),
+        );
 
         let payload = build_payload(
             &s.metrics,
@@ -659,11 +652,19 @@ mod tests {
         let m = Metrics::new();
         let payload = build_payload(&m, 0.0, 0.0, 0.0, vec![]);
         for field in &[
-            "uptime_ms", "control_clients", "imaging_clients",
-            "control_rx", "control_tx", "control_events",
-            "imaging_frames", "imaging_bytes",
-            "upstream_control_up", "upstream_imaging_up",
-            "control_rx_rate", "imaging_frame_rate", "imaging_bytes_rate",
+            "uptime_ms",
+            "control_clients",
+            "imaging_clients",
+            "control_rx",
+            "control_tx",
+            "control_events",
+            "imaging_frames",
+            "imaging_bytes",
+            "upstream_control_up",
+            "upstream_imaging_up",
+            "control_rx_rate",
+            "imaging_frame_rate",
+            "imaging_bytes_rate",
             "log_entries",
         ] {
             assert!(payload.get(field).is_some(), "missing field: {}", field);
@@ -742,9 +743,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), 200);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/html"), "expected text/html, got: {}", ct);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(!body.is_empty());
         assert!(body.windows(15).any(|w| w == b"<!DOCTYPE html>"));
     }
@@ -758,10 +766,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), 200);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
-        assert!(ct.contains("application/json"), "expected json, got: {}", ct);
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("application/json"),
+            "expected json, got: {}",
+            ct
+        );
 
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).expect("valid JSON");
         assert!(json.get("uptime_ms").is_some());
         assert!(json.get("control_clients").is_some());
@@ -783,7 +802,9 @@ mod tests {
             .await
             .unwrap();
 
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["control_rx"], 99);
         assert_eq!(json["imaging_frames"], 7);
@@ -799,7 +820,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), 200);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(
             ct.contains("text/event-stream"),
             "SSE endpoint must return text/event-stream, got: {}",

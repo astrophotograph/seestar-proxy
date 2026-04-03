@@ -43,7 +43,8 @@ impl WgKeypair {
                 Err(e) => warn!(
                     "Could not save WireGuard key to {} ({}). Using ephemeral key — \
                      clients will need a new QR code after each restart.",
-                    path.display(), e
+                    path.display(),
+                    e
                 ),
             }
             Ok(keypair)

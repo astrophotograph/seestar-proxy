@@ -45,7 +45,9 @@ async fn start_echo_telescope() -> SocketAddr {
         // Accept connections in a loop so multiple clients can connect
         // (the proxy itself opens one persistent connection).
         loop {
-            let Ok((stream, _)) = listener.accept().await else { break };
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
             tokio::spawn(async move {
                 let (reader, mut writer) = stream.into_split();
                 let mut reader = BufReader::new(reader);
@@ -84,7 +86,9 @@ async fn start_event_on_request_telescope(event_json: &'static str) -> SocketAdd
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        let Ok((stream, _)) = listener.accept().await else { return };
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
@@ -118,7 +122,14 @@ async fn start_event_on_request_telescope(event_json: &'static str) -> SocketAdd
 /// Start the control proxy and wait until its listen port is open.
 async fn start_proxy(telescope_addr: SocketAddr) -> SocketAddr {
     let proxy_addr = free_addr();
-    tokio::spawn(seestar_proxy::control::run(proxy_addr, Some(telescope_addr), false, None, None, None));
+    tokio::spawn(seestar_proxy::control::run(
+        proxy_addr,
+        Some(telescope_addr),
+        false,
+        None,
+        None,
+        None,
+    ));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
     proxy_addr
 }
@@ -136,9 +147,7 @@ async fn connect_client(
 }
 
 /// Read one `\r\n`-terminated line and parse it as JSON.
-async fn read_json(
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
-) -> serde_json::Value {
+async fn read_json(reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>) -> serde_json::Value {
     let mut line = String::new();
     tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
         .await
@@ -314,8 +323,8 @@ async fn proxy_ignores_invalid_json_from_client() {
 
 #[tokio::test]
 async fn proxy_records_control_traffic() {
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -350,10 +359,9 @@ async fn proxy_records_control_traffic() {
     // Give the async record writes a moment to flush.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let content =
-        tokio::fs::read_to_string(record_dir.join("control.jsonl"))
-            .await
-            .unwrap();
+    let content = tokio::fs::read_to_string(record_dir.join("control.jsonl"))
+        .await
+        .unwrap();
     assert!(
         !content.is_empty(),
         "control.jsonl should contain recorded messages"
@@ -377,8 +385,7 @@ async fn recorder_logs_each_message_exactly_once() {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    let record_dir =
-        std::env::temp_dir().join(format!("seestar_dup_rec_{pid}_{n}"));
+    let record_dir = std::env::temp_dir().join(format!("seestar_dup_rec_{pid}_{n}"));
 
     let recorder = Arc::new(
         seestar_proxy::recorder::Recorder::new(&record_dir)
@@ -469,8 +476,7 @@ async fn oversized_line_closes_connection() {
     // Bug: proxy parses invalid JSON, logs a warning, and keeps the
     // connection open → read() blocks → we time out.
     let mut buf = [0u8; 1];
-    let result =
-        tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
+    let result = tokio::time::timeout(Duration::from_secs(2), stream.read(&mut buf)).await;
 
     match result {
         Ok(Ok(0)) | Ok(Err(_)) => {} // EOF or reset — expected after fix
@@ -496,9 +502,7 @@ async fn pending_map_rejects_overflow() {
     // Fill the map to capacity.
     for i in 0..LIMIT {
         writer
-            .write_all(
-                format!("{{\"id\":{i},\"method\":\"fill\"}}\r\n").as_bytes(),
-            )
+            .write_all(format!("{{\"id\":{i},\"method\":\"fill\"}}\r\n").as_bytes())
             .await
             .unwrap();
     }

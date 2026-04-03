@@ -177,7 +177,8 @@ async fn run_stack(
     );
 
     // Active tunnel connections: maps socket handle to data channels.
-    type ConnMap = std::collections::HashMap<SocketHandle, (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)>;
+    type ConnMap =
+        std::collections::HashMap<SocketHandle, (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)>;
     let mut active_connections: ConnMap = std::collections::HashMap::new();
 
     // Poll loop.
@@ -200,12 +201,18 @@ async fn run_stack(
 
         if result == smoltcp::iface::PollResult::SocketStateChanged {
             // Check for new connections on listen sockets.
-            for (handle, port) in [(control_handle, control_port), (imaging_handle, imaging_port)] {
+            for (handle, port) in [
+                (control_handle, control_port),
+                (imaging_handle, imaging_port),
+            ] {
                 let socket = sockets.get_mut::<tcp::Socket>(handle);
                 if socket.is_active() && !active_connections.contains_key(&handle) {
                     // New connection accepted!
                     let remote = socket.remote_endpoint();
-                    info!("NetStack: TCP connection on port {} from {:?}", port, remote);
+                    info!(
+                        "NetStack: TCP connection on port {} from {:?}",
+                        port, remote
+                    );
 
                     let (from_tunnel_tx, from_tunnel_rx) = mpsc::channel::<Vec<u8>>(64);
                     let (to_tunnel_tx, to_tunnel_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -219,7 +226,10 @@ async fn run_stack(
                     };
 
                     if conn_tx.try_send(stream).is_err() {
-                        warn!("NetStack: connection channel full, dropping connection on port {}", port);
+                        warn!(
+                            "NetStack: connection channel full, dropping connection on port {}",
+                            port
+                        );
                     }
                 }
             }

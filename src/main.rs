@@ -1,6 +1,6 @@
-use seestar_proxy::{control, dashboard, discovery, hooks, imaging, metrics, protocol};
 use seestar_proxy::config::Config;
 use seestar_proxy::recorder::Recorder;
+use seestar_proxy::{control, dashboard, discovery, hooks, imaging, metrics, protocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -60,7 +60,10 @@ async fn main() -> anyhow::Result<()> {
         println!("Seestar Proxy (RAW PIPE MODE)");
         println!("=============================");
         println!("  Upstream:   {} (control), {} (imaging)", uc, ui);
-        println!("  Listening:  {} (control), {} (imaging)", bind_control, bind_imaging);
+        println!(
+            "  Listening:  {} (control), {} (imaging)",
+            bind_control, bind_imaging
+        );
         println!("  Mode:       transparent byte pipe (no parsing, single client)");
         println!();
 
@@ -84,7 +87,11 @@ async fn main() -> anyhow::Result<()> {
     println!("Seestar Proxy");
     println!("=============");
     if let Some(uc) = upstream_control {
-        println!("  Upstream:   {} (control), {} (imaging)", uc, upstream_imaging.unwrap());
+        println!(
+            "  Upstream:   {} (control), {} (imaging)",
+            uc,
+            upstream_imaging.unwrap()
+        );
     } else {
         println!("  Upstream:   (transparent mode — resolved from first client)");
     }
@@ -96,7 +103,10 @@ async fn main() -> anyhow::Result<()> {
         println!("  Mode:       transparent (SO_ORIGINAL_DST)");
     }
     if config.discovery {
-        println!("  Discovery:  bridging on UDP port {}", protocol::DISCOVERY_PORT);
+        println!(
+            "  Discovery:  bridging on UDP port {}",
+            protocol::DISCOVERY_PORT
+        );
     }
     if let Some(ref dir) = config.record {
         println!("  Recording:  {}", dir.display());
@@ -132,12 +142,12 @@ async fn main() -> anyhow::Result<()> {
             config.wg_key_file.clone()
         };
 
-        let wg_upstream_ip = upstream_control
-            .map(|s| s.ip())
-            .unwrap_or_else(|| {
-                warn!("WireGuard requires --upstream in transparent mode; using localhost as placeholder");
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
-            });
+        let wg_upstream_ip = upstream_control.map(|s| s.ip()).unwrap_or_else(|| {
+            warn!(
+                "WireGuard requires --upstream in transparent mode; using localhost as placeholder"
+            );
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        });
         match seestar_proxy::wireguard::start(
             config.bind,
             config.wg_port,
@@ -148,7 +158,9 @@ async fn main() -> anyhow::Result<()> {
             config.upstream_imaging_port,
             control_inject_tx,
             imaging_inject_tx,
-        ).await {
+        )
+        .await
+        {
             Ok(info) => {
                 println!("  WireGuard:  udp://{}:{}", config.bind, config.wg_port);
                 Some(info)
@@ -175,7 +187,11 @@ async fn main() -> anyhow::Result<()> {
     let _ts_info = if config.tailscale {
         // Create state directory if needed.
         if let Err(e) = std::fs::create_dir_all(&config.ts_state_dir) {
-            warn!("Could not create Tailscale state dir {}: {}", config.ts_state_dir.display(), e);
+            warn!(
+                "Could not create Tailscale state dir {}: {}",
+                config.ts_state_dir.display(),
+                e
+            );
         }
         match seestar_proxy::tailscale::start(
             &config.ts_hostname,
@@ -214,8 +230,15 @@ async fn main() -> anyhow::Result<()> {
     // Spawn dashboard (after WireGuard/Tailscale so it can include their info).
     let dashboard_handle = if config.dashboard_port != 0 {
         let bind_dash = std::net::SocketAddr::new(config.bind, config.dashboard_port);
-        let display_host = if config.bind.is_unspecified() { "localhost".to_string() } else { config.bind.to_string() };
-        println!("  Dashboard:  http://{}:{}", display_host, config.dashboard_port);
+        let display_host = if config.bind.is_unspecified() {
+            "localhost".to_string()
+        } else {
+            config.bind.to_string()
+        };
+        println!(
+            "  Dashboard:  http://{}:{}",
+            display_host, config.dashboard_port
+        );
         let metrics_d = proxy_metrics.clone();
 
         #[cfg(feature = "wireguard")]
@@ -252,7 +275,16 @@ async fn main() -> anyhow::Result<()> {
     let metrics_c = proxy_metrics.clone();
     let hooks_c = hook_engine.clone();
     let control_handle = tokio::spawn(async move {
-        if let Err(e) = control::run(bind_control, upstream_control, transparent, recorder_c, Some(metrics_c), hooks_c).await {
+        if let Err(e) = control::run(
+            bind_control,
+            upstream_control,
+            transparent,
+            recorder_c,
+            Some(metrics_c),
+            hooks_c,
+        )
+        .await
+        {
             error!("Control proxy error: {}", e);
         }
     });
@@ -260,20 +292,32 @@ async fn main() -> anyhow::Result<()> {
     let recorder_i = recorder.clone();
     let metrics_i = proxy_metrics.clone();
     let imaging_handle = tokio::spawn(async move {
-        if let Err(e) = imaging::run(bind_imaging, upstream_imaging, transparent, recorder_i, Some(metrics_i)).await {
+        if let Err(e) = imaging::run(
+            bind_imaging,
+            upstream_imaging,
+            transparent,
+            recorder_i,
+            Some(metrics_i),
+        )
+        .await
+        {
             error!("Imaging proxy error: {}", e);
         }
     });
 
     let discovery_handle = if config.discovery {
         let bind = config.bind;
-        let upstream = upstream_control.map(|s| s.ip());
         let port = config.control_port;
-        Some(tokio::spawn(async move {
-            if let Err(e) = discovery::run(bind, upstream, port).await {
-                error!("Discovery bridge error: {}", e);
-            }
-        }))
+        if let Some(upstream_ip) = upstream_control.map(|s| s.ip()) {
+            Some(tokio::spawn(async move {
+                if let Err(e) = discovery::run(bind, upstream_ip, port).await {
+                    error!("Discovery bridge error: {}", e);
+                }
+            }))
+        } else {
+            warn!("Discovery requires --upstream in transparent mode; skipping");
+            None
+        }
     } else {
         None
     };
@@ -368,7 +412,10 @@ async fn raw_pipe(bind: SocketAddr, upstream: SocketAddr, label: &'static str) {
                     Err(_) => break,
                 };
                 total += n as u64;
-                info!("[{}] client -> telescope: {} bytes (total {})", l1, n, total);
+                info!(
+                    "[{}] client -> telescope: {} bytes (total {})",
+                    l1, n, total
+                );
                 if telescope_writer.write_all(&buf[..n]).await.is_err() {
                     break;
                 }
@@ -388,7 +435,10 @@ async fn raw_pipe(bind: SocketAddr, upstream: SocketAddr, label: &'static str) {
                 };
                 total += n as u64;
                 let newlines = buf[..n].iter().filter(|&&b| b == b'\n').count();
-                info!("[{}] telescope -> client: {} bytes ({} newlines, total {})", l2, n, newlines, total);
+                info!(
+                    "[{}] telescope -> client: {} bytes ({} newlines, total {})",
+                    l2, n, newlines, total
+                );
                 if client_writer.write_all(&buf[..n]).await.is_err() {
                     break;
                 }

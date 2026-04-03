@@ -77,13 +77,25 @@ impl Metrics {
     }
 
     /// Like [`push_log`] but also stores the raw JSON payload for dashboard display.
-    pub fn push_log_with_payload(&self, channel: &'static str, summary: String, payload: Option<String>) {
+    pub fn push_log_with_payload(
+        &self,
+        channel: &'static str,
+        summary: String,
+        payload: Option<String>,
+    ) {
         let seq = self.log_seq.fetch_add(1, Ordering::Relaxed);
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let entry = LogEntry { seq, elapsed_ms: self.elapsed_ms(), timestamp_ms, channel, summary, payload };
+        let entry = LogEntry {
+            seq,
+            elapsed_ms: self.elapsed_ms(),
+            timestamp_ms,
+            channel,
+            summary,
+            payload,
+        };
         if let Ok(mut log) = self.log.lock() {
             if log.len() >= LOG_CAPACITY {
                 log.pop_front();
@@ -127,7 +139,10 @@ mod tests {
     #[test]
     fn elapsed_ms_is_small_immediately_after_construction() {
         let m = Metrics::new();
-        assert!(m.elapsed_ms() < 500, "should be well under 500ms after construction");
+        assert!(
+            m.elapsed_ms() < 500,
+            "should be well under 500ms after construction"
+        );
     }
 
     // ── push_log ──────────────────────────────────────────────────────────────
@@ -174,8 +189,15 @@ mod tests {
         m.push_log("ctrl-rx", "extra".to_string());
 
         let entries = m.log_since(None);
-        assert_eq!(entries.len(), LOG_CAPACITY, "buffer must not grow past capacity");
-        assert_eq!(entries[0].summary, "msg-1", "oldest entry must have been dropped");
+        assert_eq!(
+            entries.len(),
+            LOG_CAPACITY,
+            "buffer must not grow past capacity"
+        );
+        assert_eq!(
+            entries[0].summary, "msg-1",
+            "oldest entry must have been dropped"
+        );
         assert_eq!(entries[LOG_CAPACITY - 1].summary, "extra");
     }
 
@@ -189,7 +211,10 @@ mod tests {
         let entries = m.log_since(None);
         // Seqs must still be strictly increasing even after wrapping
         for window in entries.windows(2) {
-            assert!(window[1].seq > window[0].seq, "seqs must be strictly increasing");
+            assert!(
+                window[1].seq > window[0].seq,
+                "seqs must be strictly increasing"
+            );
         }
     }
 

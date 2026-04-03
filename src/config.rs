@@ -119,7 +119,11 @@ pub struct Config {
 
     /// Tailscale state directory
     #[cfg(feature = "tailscale")]
-    #[arg(long, default_value = "/var/lib/seestar-proxy/tailscale", env = "SEESTAR_TS_STATE_DIR")]
+    #[arg(
+        long,
+        default_value = "/var/lib/seestar-proxy/tailscale",
+        env = "SEESTAR_TS_STATE_DIR"
+    )]
     pub ts_state_dir: PathBuf,
 
     /// Tailscale control server URL (for Headscale users)
@@ -148,7 +152,11 @@ pub struct Config {
     pub wg_subnet: String,
 
     /// WireGuard key file path
-    #[arg(long, default_value = "~/.seestar-proxy/wg.key", env = "SEESTAR_WG_KEY_FILE")]
+    #[arg(
+        long,
+        default_value = "~/.seestar-proxy/wg.key",
+        env = "SEESTAR_WG_KEY_FILE"
+    )]
     pub wg_key_file: PathBuf,
 
     /// External endpoint for WireGuard client config (e.g., mypi.duckdns.org:51820).
@@ -168,10 +176,12 @@ impl Config {
         let mut config = Config::parse();
 
         if let Some(path) = config.config.clone() {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e))?;
-            let file: FileConfig = toml::from_str(&content)
-                .map_err(|e| anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e))?;
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("Failed to read config file {}: {}", path.display(), e)
+            })?;
+            let file: FileConfig = toml::from_str(&content).map_err(|e| {
+                anyhow::anyhow!("Failed to parse config file {}: {}", path.display(), e)
+            })?;
             config.apply_file(file);
             info!("Loaded config from {}", path.display());
         } else {

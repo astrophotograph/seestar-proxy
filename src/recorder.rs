@@ -254,9 +254,7 @@ mod tests {
 
         assert_eq!(rec.frame_counter.load(Ordering::Relaxed), 0);
 
-        let entries: Vec<_> = std::fs::read_dir(dir.join("frames"))
-            .unwrap()
-            .collect();
+        let entries: Vec<_> = std::fs::read_dir(dir.join("frames")).unwrap().collect();
         assert!(entries.is_empty());
     }
 

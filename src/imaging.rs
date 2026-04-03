@@ -10,8 +10,8 @@
 use crate::metrics::Metrics;
 use crate::protocol::{FrameHeader, HEADER_SIZE};
 use crate::recorder::Recorder;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -44,8 +44,7 @@ pub async fn run(
         let metrics = metrics.clone();
         let resolved_upstream = resolved_upstream.clone();
         tokio::spawn(async move {
-            // Wait for the upstream address to be resolved (immediate if --upstream is set,
-            // otherwise waits for SO_ORIGINAL_DST from first imaging client).
+            // Wait for the upstream address to be resolved.
             let upstream_addr = loop {
                 if let Some(&addr) = resolved_upstream.get() {
                     break addr;
@@ -74,7 +73,10 @@ pub async fn run(
                         warn!("Telescope imaging connection lost");
                     }
                     Ok(Err(e)) => error!("Failed to connect to telescope imaging: {}", e),
-                    Err(_) => error!("Timed out connecting to telescope imaging at {}", upstream_addr),
+                    Err(_) => error!(
+                        "Timed out connecting to telescope imaging at {}",
+                        upstream_addr
+                    ),
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
@@ -92,7 +94,10 @@ pub async fn run(
         if transparent && resolved_upstream.get().is_none() {
             use std::os::unix::io::AsRawFd;
             if let Some(orig) = crate::transparent::get_original_dst(client_stream.as_raw_fd()) {
-                info!("Imaging transparent mode: resolved upstream from SO_ORIGINAL_DST: {}", orig);
+                info!(
+                    "Imaging transparent mode: resolved upstream from SO_ORIGINAL_DST: {}",
+                    orig
+                );
                 let _ = resolved_upstream.set(orig);
             }
         }
@@ -181,7 +186,8 @@ async fn upstream_reader_task(
 
         if let Some(m) = &metrics {
             m.imaging_frames.fetch_add(1, Ordering::Relaxed);
-            m.imaging_bytes.fetch_add((HEADER_SIZE + payload.len()) as u64, Ordering::Relaxed);
+            m.imaging_bytes
+                .fetch_add((HEADER_SIZE + payload.len()) as u64, Ordering::Relaxed);
             // Log every 30th frame to avoid flooding the traffic log.
             frame_count += 1;
             if frame_count % 30 == 1 {
@@ -189,10 +195,16 @@ async fn upstream_reader_task(
                     20 => "view",
                     21 => "preview",
                     23 => "stack",
-                    _  => "frame",
+                    _ => "frame",
                 };
                 let summary = if header.is_image() {
-                    format!("{} {}x{} ({:.1} KB)", kind, header.width, header.height, header.size as f64 / 1024.0)
+                    format!(
+                        "{} {}x{} ({:.1} KB)",
+                        kind,
+                        header.width,
+                        header.height,
+                        header.size as f64 / 1024.0
+                    )
                 } else {
                     format!("{} ({} bytes)", kind, header.size)
                 };
@@ -411,11 +423,8 @@ mod tests {
         // Bug: handle_client exits on Lagged, server_side gets EOF, read fails.
         // Fix: handle_client recovers from Lagged and delivers subsequent frames.
         let mut buf = vec![0u8; 4];
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            server_side.read_exact(&mut buf),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(1), server_side.read_exact(&mut buf)).await;
 
         assert!(
             result.is_ok_and(|r| r.is_ok()),
