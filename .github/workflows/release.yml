@@ -56,21 +56,38 @@ jobs:
             use_cross: true
             deb_arch: armhf
             features: "--no-default-features --features wireguard,lua54"
+            suffix: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
             deb_arch: arm64
             features: "--no-default-features --features wireguard,lua54"
+            suffix: ""
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: false
             deb_arch: amd64
             features: "--no-default-features --features wireguard,lua54"
+            suffix: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
             deb_arch: ""
             features: ""
+            suffix: ""
+          # Tailscale variants (larger binary, includes Go runtime)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: false
+            deb_arch: amd64
+            features: "--no-default-features --features wireguard,tailscale,lua54"
+            suffix: "-tailscale"
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use_cross: false
+            deb_arch: ""
+            features: "--features tailscale,wireguard,luajit"
+            suffix: "-tailscale"
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -87,9 +104,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Go (for Tailscale builds)
+        if: matrix.suffix == '-tailscale'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}${{ matrix.suffix }}
 
       - name: Install cross
         if: matrix.use_cross
@@ -111,28 +134,30 @@ jobs:
         shell: bash
         run: |
           SRC="target/${{ matrix.target }}/release/seestar-proxy"
-          DEST="seestar-proxy-${{ matrix.target }}"
+          DEST="seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}"
           cp "$SRC" "$DEST"
-          echo "Binary size: $(du -h "$DEST" | cut -f1)"
+          echo "Binary: $DEST ($(du -h "$DEST" | cut -f1))"
 
       - name: Build .deb package
         if: matrix.deb_arch != ''
         run: |
           VERSION="${{ needs.determine-version.outputs.version }}"
           ARCH="${{ matrix.deb_arch }}"
-          PKG="seestar-proxy_${VERSION}_${ARCH}"
+          SUFFIX="${{ matrix.suffix }}"
+          PKG="seestar-proxy${SUFFIX}_${VERSION}_${ARCH}"
           mkdir -p "${PKG}/DEBIAN"
           mkdir -p "${PKG}/usr/bin"
           mkdir -p "${PKG}/lib/systemd/system"
           mkdir -p "${PKG}/etc/seestar-proxy"
 
-          cp "seestar-proxy-${{ matrix.target }}" "${PKG}/usr/bin/seestar-proxy"
+          cp "seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}" "${PKG}/usr/bin/seestar-proxy"
           chmod 755 "${PKG}/usr/bin/seestar-proxy"
           cp dist/seestar-proxy.service "${PKG}/lib/systemd/system/"
           cp dist/config.toml.example "${PKG}/etc/seestar-proxy/"
 
+          PKG_NAME="seestar-proxy${SUFFIX}"
           cat > "${PKG}/DEBIAN/control" <<EOF
-          Package: seestar-proxy
+          Package: ${PKG_NAME}
           Version: ${VERSION}
           Architecture: ${ARCH}
           Maintainer: astrophotograph <astrophotograph@users.noreply.github.com>
@@ -155,9 +180,9 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: seestar-proxy-${{ matrix.target }}
+          name: seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}
           path: |
-            seestar-proxy-${{ matrix.target }}
+            seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}
             *.deb
 
   publish-release:
