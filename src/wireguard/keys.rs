@@ -134,7 +134,11 @@ mod tests {
     fn generate_client_keypair_each_call_is_different() {
         let (_, pub_a) = generate_client_keypair();
         let (_, pub_b) = generate_client_keypair();
-        assert_ne!(pub_a.as_bytes(), pub_b.as_bytes(), "each keypair must be unique");
+        assert_ne!(
+            pub_a.as_bytes(),
+            pub_b.as_bytes(),
+            "each keypair must be unique"
+        );
     }
 
     #[test]
@@ -189,6 +193,9 @@ mod tests {
         // If try_persist fails, load_or_generate should still return Ok.
         let path = std::path::PathBuf::from("/nonexistent_root_dir/seestar/wg.key");
         let result = WgKeypair::load_or_generate(&path);
-        assert!(result.is_ok(), "ephemeral key fallback must not propagate persist error");
+        assert!(
+            result.is_ok(),
+            "ephemeral key fallback must not propagate persist error"
+        );
     }
 }

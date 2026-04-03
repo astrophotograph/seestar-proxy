@@ -84,7 +84,10 @@ mod tests {
     #[test]
     fn sync_returns_error_when_server_unreachable() {
         let result = sync("127.0.0.1");
-        assert!(result.is_err(), "sync must fail when no NTP server is running");
+        assert!(
+            result.is_err(),
+            "sync must fail when no NTP server is running"
+        );
         let msg = result.unwrap_err().to_string();
         assert!(
             msg.contains("NTP query failed"),

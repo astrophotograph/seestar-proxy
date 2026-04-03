@@ -355,13 +355,11 @@ mod tests {
         use tokio::net::TcpStream;
 
         let addr = std::net::SocketAddr::new(upstream_addr, port);
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            TcpStream::connect(addr),
-        )
-        .await
-        .ok()?  // Elapsed → None
-        .ok()?; // io::Error → None
+        let stream =
+            tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr))
+                .await
+                .ok()? // Elapsed → None
+                .ok()?; // io::Error → None
 
         let (reader, mut writer) = stream.into_split();
         let mut reader = BufReader::new(reader);
@@ -406,7 +404,10 @@ mod tests {
 
         let upstream: IpAddr = "127.0.0.1".parse().unwrap();
         let result = fetch_device_info_tcp_at(upstream, port).await;
-        assert!(result.is_none(), "must return None when connection is refused");
+        assert!(
+            result.is_none(),
+            "must return None when connection is refused"
+        );
     }
 
     /// Malformed JSON response — must return None gracefully.
@@ -438,7 +439,10 @@ mod tests {
         }
         let upstream: IpAddr = "127.0.0.1".parse().unwrap();
         let result = fetch_device_info_tcp(upstream).await;
-        assert!(result.is_none(), "must return None when nothing listens on port 4700");
+        assert!(
+            result.is_none(),
+            "must return None when nothing listens on port 4700"
+        );
     }
 
     /// Response with missing result fields falls back to defaults.

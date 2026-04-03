@@ -370,7 +370,10 @@ mod tests {
         dev.inject(vec![0xAA, 0xBB]);
         let t = SmolInstant::from_millis(0);
         let tokens = dev.receive(t);
-        assert!(tokens.is_some(), "receive must return tokens when data is available");
+        assert!(
+            tokens.is_some(),
+            "receive must return tokens when data is available"
+        );
         let (rx_tok, _tx_tok) = tokens.unwrap();
         let data = rx_tok.consume(|b| b.to_vec());
         assert_eq!(data, vec![0xAA, 0xBB]);

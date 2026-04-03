@@ -541,13 +541,17 @@ async fn notification_without_id_is_forwarded_to_telescope() {
     let (received_tx, mut received_rx) = tokio::sync::mpsc::channel::<String>(8);
 
     tokio::spawn(async move {
-        let Ok((stream, _)) = listener.accept().await else { return };
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
         let (reader, _writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
         let mut line = String::new();
         loop {
             line.clear();
-            if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break; }
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break;
+            }
             let trimmed = line.trim().to_string();
             if !trimmed.is_empty() {
                 let _ = received_tx.send(trimmed).await;
@@ -571,7 +575,10 @@ async fn notification_without_id_is_forwarded_to_telescope() {
 
     let v: serde_json::Value = serde_json::from_str(&received).unwrap();
     assert_eq!(v["method"], "notify_something");
-    assert!(v.get("id").is_none(), "notification must have no id field after forwarding");
+    assert!(
+        v.get("id").is_none(),
+        "notification must have no id field after forwarding"
+    );
 }
 
 /// A client that sends a request with a string id (valid JSON-RPC) gets the

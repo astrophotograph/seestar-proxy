@@ -627,9 +627,13 @@ mod tests {
         let (udp, peer) = dummy_udp().await;
         let (inject_tx, _rx) = mpsc::channel::<Vec<u8>>(8);
         let mut data = *b"hello";
-        let action =
-            process_tunn_result(&udp, peer, TunnResult::WriteToNetwork(&mut data), &inject_tx)
-                .await;
+        let action = process_tunn_result(
+            &udp,
+            peer,
+            TunnResult::WriteToNetwork(&mut data),
+            &inject_tx,
+        )
+        .await;
         assert!(matches!(action, TunnAction::Continue));
     }
 
@@ -641,7 +645,7 @@ mod tests {
         // Minimal 40-byte IPv4+TCP packet (checksums don't matter for this test).
         let mut pkt = vec![0u8; 40];
         pkt[0] = 0x45; // IPv4, IHL=5 (20 bytes)
-        pkt[9] = 6;    // Protocol: TCP
+        pkt[9] = 6; // Protocol: TCP
         pkt[16..20].copy_from_slice(&[10, 99, 0, 1]); // dst IP
         pkt[20..22].copy_from_slice(&[0xD4, 0x31]); // src port = 54321
         pkt[22..24].copy_from_slice(&[0x12, 0x5C]); // dst port = 4700
@@ -729,7 +733,7 @@ mod tests {
         let mut tunn = make_test_tunn();
         let mut pkt = vec![0u8; 40];
         pkt[0] = 0x45; // IPv4, IHL=5
-        pkt[9] = 6;    // TCP
+        pkt[9] = 6; // TCP
         pkt[16..20].copy_from_slice(&upstream_ip);
         pkt[22..24].copy_from_slice(&[0x00, 0x50]); // dst port 80
         // Should complete without panic.
@@ -745,10 +749,10 @@ mod tests {
         // Minimal ICMP echo request: 28+ bytes, protocol=1, dst=upstream_ip, ICMP type=8.
         let mut pkt = vec![0u8; 28];
         pkt[0] = 0x45; // IPv4, IHL=5
-        pkt[9] = 1;    // ICMP
+        pkt[9] = 1; // ICMP
         pkt[16..20].copy_from_slice(&upstream_ip); // dst = upstream
-        pkt[20] = 8;   // ICMP echo request
-        pkt[21] = 0;   // code
+        pkt[20] = 8; // ICMP echo request
+        pkt[21] = 0; // code
         // No real checksum — handle_icmp_echo builds the reply directly.
         handle_decrypted_packet(&pkt, upstream_ip, "{}", &mut tunn, &udp, peer).await;
     }
@@ -776,8 +780,8 @@ mod tests {
         let result = fetch_device_info_tcp("127.0.0.1".parse().unwrap(), 1).await;
         // Whether it gets a connection or not, it must return a valid JSON string.
         assert!(!result.is_empty(), "must return non-empty fallback JSON");
-        let _v: serde_json::Value = serde_json::from_str(&result)
-            .expect("fallback must be valid JSON");
+        let _v: serde_json::Value =
+            serde_json::from_str(&result).expect("fallback must be valid JSON");
     }
 
     // ── detect_local_ip() ─────────────────────────────────────────────────────
@@ -816,7 +820,10 @@ mod tests {
         let s = default_device_info();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         let model = v["result"]["product_model"].as_str().unwrap();
-        assert!(model.contains("Seestar"), "product_model must mention Seestar");
+        assert!(
+            model.contains("Seestar"),
+            "product_model must mention Seestar"
+        );
     }
 }
 

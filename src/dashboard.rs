@@ -892,9 +892,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
-        assert!(ct.contains("text/plain"), "expected text/plain, got: {}", ct);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/plain"),
+            "expected text/plain, got: {}",
+            ct
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(body.starts_with(b"[Interface]"));
     }
 
@@ -925,9 +936,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        let ct = response.headers().get("content-type").unwrap().to_str().unwrap();
-        assert!(ct.contains("image/svg+xml"), "expected image/svg+xml, got: {}", ct);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("image/svg+xml"),
+            "expected image/svg+xml, got: {}",
+            ct
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         assert!(body.starts_with(b"<svg>"));
     }
 
@@ -958,10 +980,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let html = std::str::from_utf8(&body).unwrap();
-        assert!(html.contains("WireGuard Tunnel"), "WG section should appear in HTML");
-        assert!(html.contains("mypi.example.com:51820"), "endpoint must appear in HTML");
+        assert!(
+            html.contains("WireGuard Tunnel"),
+            "WG section should appear in HTML"
+        );
+        assert!(
+            html.contains("mypi.example.com:51820"),
+            "endpoint must appear in HTML"
+        );
         assert!(html.contains("[Interface]"), "config must appear in HTML");
         assert!(html.contains("<svg>"), "QR SVG must appear in HTML");
     }
@@ -1004,8 +1034,15 @@ mod tests {
         conn.read_to_string(&mut resp).await.unwrap();
         server_task.abort();
 
-        assert!(resp.starts_with("HTTP/1.1 200"), "expected 200 OK, got: {}", &resp[..resp.len().min(40)]);
-        assert!(resp.contains("control_rx"), "response must contain stats JSON");
+        assert!(
+            resp.starts_with("HTTP/1.1 200"),
+            "expected 200 OK, got: {}",
+            &resp[..resp.len().min(40)]
+        );
+        assert!(
+            resp.contains("control_rx"),
+            "response must contain stats JSON"
+        );
     }
 
     #[tokio::test]
@@ -1015,7 +1052,9 @@ mod tests {
             .oneshot(Request::get("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let html = std::str::from_utf8(&body).unwrap();
         assert!(
             !html.contains("WireGuard Tunnel"),

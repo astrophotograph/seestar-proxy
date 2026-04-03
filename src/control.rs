@@ -1112,7 +1112,10 @@ mod tests {
         ));
 
         // Send the event in two separate writes without flushing between them.
-        mock_telescope.write_all(b"{\"Event\":\"Partial").await.unwrap();
+        mock_telescope
+            .write_all(b"{\"Event\":\"Partial")
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         mock_telescope.write_all(b"Data\"}\r\n").await.unwrap();
 
