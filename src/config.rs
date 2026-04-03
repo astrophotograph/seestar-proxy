@@ -387,7 +387,8 @@ mod tests {
 
     #[test]
     fn apply_file_does_not_overwrite_set_wg_endpoint() {
-        let mut cfg = Config::parse_from(["seestar-proxy", "--wg-endpoint", "cli.example.com:51820"]);
+        let mut cfg =
+            Config::parse_from(["seestar-proxy", "--wg-endpoint", "cli.example.com:51820"]);
         cfg.apply_file(FileConfig {
             wg_endpoint: Some("file.example.com:51820".to_string()),
             ..Default::default()
@@ -543,7 +544,10 @@ mod tests {
             discovery: Some(false),
             ..Default::default()
         });
-        assert!(cfg.discovery, "CLI --discovery flag must not be overridden by file false");
+        assert!(
+            cfg.discovery,
+            "CLI --discovery flag must not be overridden by file false"
+        );
     }
 
     #[test]
@@ -575,7 +579,11 @@ mod tests {
             hooks: Some(vec!["/a.lua".into(), "/b.lua".into()]),
             ..Default::default()
         });
-        assert_eq!(cfg.hooks.len(), 2, "duplicate hook /a.lua must not be added twice");
+        assert_eq!(
+            cfg.hooks.len(),
+            2,
+            "duplicate hook /a.lua must not be added twice"
+        );
     }
 
     #[test]
