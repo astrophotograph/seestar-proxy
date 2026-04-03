@@ -12,7 +12,13 @@ pre-build = [
     "wget -q https://go.dev/dl/go1.23.8.linux-amd64.tar.gz -O /tmp/go.tar.gz",
     "tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz",
     "ln -s /usr/local/go/bin/go /usr/local/bin/go",
+    "mkdir -p /tmp/go-cache /tmp/go-path/pkg/mod && chmod -R 777 /tmp/go-cache /tmp/go-path",
 ]
+
+[target.armv7-unknown-linux-gnueabihf.env]
+GOPATH = { value = "/tmp/go-path" }
+GOCACHE = { value = "/tmp/go-cache" }
+GOMODCACHE = { value = "/tmp/go-path/pkg/mod" }
 
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
@@ -20,4 +26,10 @@ pre-build = [
     "wget -q https://go.dev/dl/go1.23.8.linux-amd64.tar.gz -O /tmp/go.tar.gz",
     "tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz",
     "ln -s /usr/local/go/bin/go /usr/local/bin/go",
+    "mkdir -p /tmp/go-cache /tmp/go-path/pkg/mod && chmod -R 777 /tmp/go-cache /tmp/go-path",
 ]
+
+[target.aarch64-unknown-linux-gnu.env]
+GOPATH = { value = "/tmp/go-path" }
+GOCACHE = { value = "/tmp/go-cache" }
+GOMODCACHE = { value = "/tmp/go-path/pkg/mod" }
