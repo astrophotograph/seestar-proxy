@@ -36,6 +36,7 @@ pub async fn start(
     control_url: Option<&str>,
     control_port: u16,
     imaging_port: u16,
+    dashboard_port: u16,
 ) -> anyhow::Result<TsInfo> {
     let hostname = hostname.to_string();
     let state_dir_str = state_dir
@@ -99,6 +100,9 @@ pub async fn start(
     // Accepted connections are bridged to localhost via async tokio tasks.
     spawn_accept_loop(ts, "tcp", control_port, "control");
     spawn_accept_loop(ts, "tcp", imaging_port, "imaging");
+    if dashboard_port != 0 {
+        spawn_accept_loop(ts, "tcp", dashboard_port, "dashboard");
+    }
 
     Ok(TsInfo {
         enabled: true,

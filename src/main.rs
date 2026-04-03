@@ -173,6 +173,7 @@ async fn main() -> anyhow::Result<()> {
             config.ts_control_url.as_deref(),
             config.control_port,
             config.imaging_port,
+            config.dashboard_port,
         )
         .await
         {
