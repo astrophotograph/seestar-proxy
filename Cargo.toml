@@ -29,6 +29,9 @@ rand_core = { version = "0.6", optional = true, features = ["getrandom"] }
 socket2 = { version = "0.6.3", features = ["all"] }
 libc = "0.2"
 
+# NTP time sync (for headless Pi without RTC)
+rsntp = { version = "4", optional = true, default-features = false }
+
 # Embedded Tailscale node (feature-gated)
 # Using fork until upstream merges ARM c_char fix:
 # https://github.com/messense/libtailscale-rs
@@ -40,6 +43,7 @@ luajit = ["mlua/luajit"]
 lua54 = ["mlua/lua54"]
 wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:rand_core"]
 tailscale = ["dep:libtailscale"]
+ntp = ["dep:rsntp"]
 
 [dev-dependencies]
 tower = "0.5"

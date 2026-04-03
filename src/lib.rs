@@ -7,6 +7,8 @@ pub mod imaging;
 pub mod metrics;
 pub mod protocol;
 pub mod recorder;
+#[cfg(feature = "ntp")]
+pub mod ntp;
 #[cfg(unix)]
 pub mod transparent;
 #[cfg(feature = "wireguard")]

@@ -63,50 +63,50 @@ jobs:
             os: ubuntu-latest
             use_cross: true
             deb_arch: armhf
-            features: "--no-default-features --features wireguard,lua54"
+            features: "--no-default-features --features wireguard,lua54,ntp"
             suffix: ""
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: true
             deb_arch: arm64
-            features: "--no-default-features --features wireguard,lua54"
+            features: "--no-default-features --features wireguard,lua54,ntp"
             suffix: ""
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use_cross: false
             deb_arch: amd64
-            features: "--no-default-features --features wireguard,lua54"
+            features: "--no-default-features --features wireguard,lua54,ntp"
             suffix: ""
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
             deb_arch: ""
-            features: ""
+            features: "--features ntp"
             suffix: ""
           # Tailscale variants (larger binary, includes Go runtime)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: false
             deb_arch: amd64
-            features: "--no-default-features --features wireguard,tailscale,lua54"
+            features: "--no-default-features --features wireguard,tailscale,lua54,ntp"
             suffix: "-tailscale"
           - target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
             deb_arch: ""
-            features: "--features tailscale,wireguard,luajit"
+            features: "--features tailscale,wireguard,luajit,ntp"
             suffix: "-tailscale"
           - target: armv7-unknown-linux-gnueabihf
             os: ubuntu-latest
             use_cross: true
             deb_arch: armhf
-            features: "--no-default-features --features wireguard,tailscale,lua54"
+            features: "--no-default-features --features wireguard,tailscale,lua54,ntp"
             suffix: "-tailscale"
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             use_cross: true
             deb_arch: arm64
-            features: "--no-default-features --features wireguard,tailscale,lua54"
+            features: "--no-default-features --features wireguard,tailscale,lua54,ntp"
             suffix: "-tailscale"
 
     runs-on: ${{ matrix.os }}

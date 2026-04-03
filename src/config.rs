@@ -92,6 +92,16 @@ pub struct Config {
     #[arg(long, env = "SEESTAR_TRANSPARENT")]
     pub transparent: bool,
 
+    /// Sync system clock via NTP before starting (useful for headless Pi without RTC)
+    #[cfg(feature = "ntp")]
+    #[arg(long, env = "SEESTAR_NTP_SYNC")]
+    pub ntp_sync: bool,
+
+    /// NTP server to query
+    #[cfg(feature = "ntp")]
+    #[arg(long, default_value = "pool.ntp.org", env = "SEESTAR_NTP_SERVER")]
+    pub ntp_server: String,
+
     /// Enable embedded Tailscale node (requires tailscale feature)
     #[cfg(feature = "tailscale")]
     #[arg(long, env = "SEESTAR_TAILSCALE")]

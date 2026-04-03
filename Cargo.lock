@@ -1225,6 +1225,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsntp"
+version = "4.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "474edb0b3a6ccf4fd97360150a27e50f2a4c6ca67870fde22e288269d8b9f38d"
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1286,6 +1292,7 @@ dependencies = [
  "mlua",
  "qrcode",
  "rand_core",
+ "rsntp",
  "serde",
  "serde_json",
  "smoltcp",

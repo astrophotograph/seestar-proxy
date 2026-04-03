@@ -24,6 +24,17 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    // Sync system clock via NTP if requested (must happen before TLS-dependent
+    // services like Tailscale, which fail if the clock is wildly off).
+    #[cfg(feature = "ntp")]
+    if config.ntp_sync {
+        match seestar_proxy::ntp::sync(&config.ntp_server) {
+            Ok(Some(offset)) => info!("NTP: clock corrected by {:.1}s", offset),
+            Ok(None) => info!("NTP: clock already accurate"),
+            Err(e) => warn!("NTP sync failed: {} (continuing with current time)", e),
+        }
+    }
+
     // Resolve upstream address — either from config or dynamically via SO_ORIGINAL_DST.
     let (upstream_control, upstream_imaging) = if config.transparent && config.upstream.is_none() {
         // Transparent mode without --upstream: address resolved at runtime from
