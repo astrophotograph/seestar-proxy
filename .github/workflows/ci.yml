@@ -6,7 +6,50 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  COVERAGE_THRESHOLD: 60
+
 jobs:
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install mold linker
+        run: sudo apt-get install -y mold
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Run coverage
+        # --all-features is intentionally avoided: combining lua54+luajit breaks mlua-sys,
+        # and the tailscale feature requires a Go toolchain to build libtailscale-sys.
+        run: >
+          cargo llvm-cov
+          --features wireguard,luajit,ntp
+          --lcov
+          --output-path lcov.info
+          --fail-under-lines ${{ env.COVERAGE_THRESHOLD }}
+        env:
+          RUSTC_WRAPPER: sccache
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-lcov
+          path: lcov.info
+
   check:
     name: Check & Test
     runs-on: ubuntu-latest
