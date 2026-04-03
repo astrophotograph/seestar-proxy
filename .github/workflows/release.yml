@@ -96,6 +96,18 @@ jobs:
             deb_arch: ""
             features: "--features tailscale,wireguard,luajit"
             suffix: "-tailscale"
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            use_cross: true
+            deb_arch: armhf
+            features: "--no-default-features --features wireguard,tailscale,lua54"
+            suffix: "-tailscale"
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+            deb_arch: arm64
+            features: "--no-default-features --features wireguard,tailscale,lua54"
+            suffix: "-tailscale"
 
     runs-on: ${{ matrix.os }}
     steps:

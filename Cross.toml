@@ -1,0 +1,23 @@
+# Cross-compilation configuration for Tailscale ARM builds.
+# Installs Go in the cross Docker container since libtailscale-sys
+# needs it to compile the Go runtime.
+#
+# These targets are only used for Tailscale-enabled builds.
+# The default (non-Tailscale) ARM builds use musl targets which
+# don't need this config.
+
+[target.armv7-unknown-linux-gnueabihf]
+pre-build = [
+    "apt-get update && apt-get install -y wget",
+    "wget -q https://go.dev/dl/go1.23.8.linux-amd64.tar.gz -O /tmp/go.tar.gz",
+    "tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz",
+    "ln -s /usr/local/go/bin/go /usr/local/bin/go",
+]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update && apt-get install -y wget",
+    "wget -q https://go.dev/dl/go1.23.8.linux-amd64.tar.gz -O /tmp/go.tar.gz",
+    "tar -C /usr/local -xzf /tmp/go.tar.gz && rm /tmp/go.tar.gz",
+    "ln -s /usr/local/go/bin/go /usr/local/bin/go",
+]
