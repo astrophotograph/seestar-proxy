@@ -19,25 +19,33 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need tags for version calculation
 
       - name: Calculate version
         id: version
         run: |
-          CURRENT=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
-          echo "Current version: $CURRENT"
-
           if [[ -n "${{ inputs.version }}" ]]; then
             VERSION="${{ inputs.version }}"
           else
-            IFS='.' read -r CUR_YEAR CUR_MONTH CUR_MICRO <<< "$CURRENT"
+            # Find the latest release tag and increment from it.
+            LATEST=$(git tag -l 'v*' --sort=-v:refname | head -1 | sed 's/^v//')
+            echo "Latest tag version: ${LATEST:-none}"
+
             NOW_YEAR=$(date +%Y)
             NOW_MONTH=$(date +%-m)
 
-            if [[ "$CUR_YEAR" == "$NOW_YEAR" && "$CUR_MONTH" == "$NOW_MONTH" ]]; then
-              NEW_MICRO=$((CUR_MICRO + 1))
-              VERSION="${NOW_YEAR}.${NOW_MONTH}.${NEW_MICRO}"
-            else
+            if [[ -z "$LATEST" ]]; then
+              # No existing tags — start at YYYY.M.0
               VERSION="${NOW_YEAR}.${NOW_MONTH}.0"
+            else
+              IFS='.' read -r CUR_YEAR CUR_MONTH CUR_MICRO <<< "$LATEST"
+              if [[ "$CUR_YEAR" == "$NOW_YEAR" && "$CUR_MONTH" == "$NOW_MONTH" ]]; then
+                NEW_MICRO=$((CUR_MICRO + 1))
+                VERSION="${NOW_YEAR}.${NOW_MONTH}.${NEW_MICRO}"
+              else
+                VERSION="${NOW_YEAR}.${NOW_MONTH}.0"
+              fi
             fi
           fi
 
