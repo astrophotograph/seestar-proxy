@@ -617,24 +617,32 @@ mod tests {
     }
 
     // ── dirs_or_home ──────────────────────────────────────────────────────────
+    // Env-var tests must be serialized: mutating HOME from parallel threads is
+    // a data race. Use a process-wide mutex so the two tests don't interfere.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn dirs_or_home_uses_home_env_var() {
-        // Use a temp env override (not thread-safe, but single-thread tests are fine here)
-        let _orig = std::env::var("HOME");
+        let _guard = HOME_LOCK.lock().unwrap();
+        let orig = std::env::var("HOME").ok();
         unsafe { std::env::set_var("HOME", "/custom/home") };
         let p = dirs_or_home("foo/bar.toml");
+        match orig {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
         assert_eq!(p, PathBuf::from("/custom/home/foo/bar.toml"));
     }
 
     #[test]
     fn dirs_or_home_falls_back_to_tmp_when_home_missing() {
+        let _guard = HOME_LOCK.lock().unwrap();
         let orig = std::env::var("HOME").ok();
         unsafe { std::env::remove_var("HOME") };
         let p = dirs_or_home("sub/file.toml");
-        assert_eq!(p, PathBuf::from("/tmp/sub/file.toml"));
         if let Some(v) = orig {
             unsafe { std::env::set_var("HOME", v) };
         }
+        assert_eq!(p, PathBuf::from("/tmp/sub/file.toml"));
     }
 }
