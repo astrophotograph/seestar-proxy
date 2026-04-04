@@ -4,7 +4,7 @@
 
 Seestar Proxy is a TCP proxy and multiplexer written in Rust that enables multiple clients to simultaneously communicate with a single [Seestar](https://www.zwoastro.com/product/seestar/) smart telescope. Without the proxy, the telescope only accepts one connection at a time. The proxy intercepts all client connections, multiplexes traffic, and routes responses back to the correct originating client.
 
-A secondary goal is enabling traffic recording for offline testing and development against a mock telescope.
+Secondary goals include Lua scripting hooks for filtering/modifying traffic, an embedded HTTP dashboard for live monitoring, WireGuard remote access, and traffic recording for offline development.
 
 ---
 
@@ -19,6 +19,7 @@ A secondary goal is enabling traffic recording for offline testing and developme
                          Port 4700  JSON-RPC (control)
                          Port 4800  Binary frames (imaging)
                          Port 4720  UDP discovery (optional)
+                         Port 4090  HTTP dashboard (optional)
 ```
 
 The proxy exposes the same ports as the telescope itself, so existing clients require no configuration changes—they simply connect to the proxy's IP address instead of the telescope's.
@@ -30,12 +31,20 @@ The proxy exposes the same ports as the telescope itself, so existing clients re
 ```
 src/
 ├── main.rs         Entry point, CLI parsing, task orchestration, graceful shutdown
-├── config.rs       CLI arguments and runtime configuration
+├── lib.rs          Re-exports all modules (used for integration tests)
+├── config.rs       CLI arguments, TOML config file, environment variables
 ├── protocol.rs     Protocol constants, frame header parsing, JSON-RPC helpers
 ├── control.rs      JSON-RPC multiplexer (port 4700)
 ├── imaging.rs      Binary frame fan-out (port 4800)
 ├── discovery.rs    UDP discovery bridge (port 4720)
-└── recorder.rs     Optional traffic recording to disk
+├── recorder.rs     Optional traffic recording to disk
+├── dashboard.rs    HTTP status dashboard (port 4090)
+├── hooks.rs        Lua scripting engine (--hook)
+├── metrics.rs      Shared runtime counters read by the dashboard
+├── transparent.rs  SO_ORIGINAL_DST resolution for iptables-transparent mode (Linux)
+├── ntp.rs          NTP clock sync for headless devices (feature = "ntp")
+├── wireguard.rs    Embedded WireGuard endpoint (feature = "wireguard")
+└── tailscale.rs    Embedded Tailscale node (feature = "tailscale")
 ```
 
 ---
@@ -44,11 +53,14 @@ src/
 
 ### `main.rs` — Entry Point
 
-Parses CLI arguments, configures logging, and spawns three independent Tokio tasks:
+Parses CLI arguments (via `config::Config::load()`), optionally syncs the system clock via NTP, configures logging, and spawns independent Tokio tasks:
 
 - **Control proxy** — multiplexes JSON-RPC on port 4700
 - **Imaging proxy** — fans out binary frames on port 4800
 - **Discovery bridge** — optionally bridges UDP discovery on port 4720
+- **HTTP dashboard** — serves live stats and traffic log on port 4090
+- **WireGuard endpoint** — optional embedded VPN (feature = "wireguard")
+- **Tailscale node** — optional embedded VPN (feature = "tailscale")
 
 On `Ctrl+C`, the main task cancels all children and finalizes any active recording session.
 
@@ -56,19 +68,39 @@ On `Ctrl+C`, the main task cancels all children and finalizes any active recordi
 
 ### `config.rs` — Configuration
 
-All runtime options are configured via CLI flags using Clap:
+Configuration is resolved in this precedence order (highest to lowest):
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--upstream` | *(required)* | IP address of the telescope |
-| `--bind` | `0.0.0.0` | Local address to listen on |
-| `--control-port` | `4700` | Local JSON-RPC port |
-| `--imaging-port` | `4800` | Local imaging port |
-| `--upstream-control-port` | `4700` | Telescope control port |
-| `--upstream-imaging-port` | `4800` | Telescope imaging port |
-| `--discovery` | off | Enable UDP discovery bridging |
-| `--record <dir>` | off | Record all traffic to directory |
-| `--verbose` / `-v` | info | Increase log verbosity (repeat for debug/trace) |
+1. CLI flags
+2. TOML config file (`--config`, or auto-detected from `~/.config/seestar-proxy/config.toml` / `/etc/seestar-proxy/config.toml`)
+3. Environment variables (`SEESTAR_*`)
+4. Built-in defaults
+
+| Flag | Env var | Default | Description |
+|------|---------|---------|-------------|
+| `-u, --upstream <HOST>` | `SEESTAR_UPSTREAM` | `seestar.local` | Telescope IP address or hostname |
+| `-b, --bind <IP>` | `SEESTAR_BIND` | `0.0.0.0` | Local address to listen on |
+| `--control-port <N>` | `SEESTAR_CONTROL_PORT` | `4700` | Local JSON-RPC port |
+| `--imaging-port <N>` | `SEESTAR_IMAGING_PORT` | `4800` | Local imaging port |
+| `--upstream-control-port <N>` | `SEESTAR_UPSTREAM_CONTROL_PORT` | `4700` | Telescope control port |
+| `--upstream-imaging-port <N>` | `SEESTAR_UPSTREAM_IMAGING_PORT` | `4800` | Telescope imaging port |
+| `-d, --discovery` | `SEESTAR_DISCOVERY` | off | Enable UDP discovery bridging |
+| `-r, --record <DIR>` | `SEESTAR_RECORD` | — | Record traffic to a session directory |
+| `--raw` | — | off | Raw pipe mode (transparent forwarding, single client) |
+| `--transparent` | `SEESTAR_TRANSPARENT` | off | Resolve upstream from `SO_ORIGINAL_DST` (Linux iptables) |
+| `--dashboard-port <N>` | `SEESTAR_DASHBOARD_PORT` | `4090` | HTTP dashboard port (0 = disable) |
+| `--hook <PATH>` | — | — | Lua hook script (repeatable) |
+| `--wireguard` | `SEESTAR_WIREGUARD` | off | Enable WireGuard tunnel endpoint |
+| `--wg-port <N>` | `SEESTAR_WG_PORT` | `51820` | WireGuard UDP listen port |
+| `--wg-subnet <CIDR>` | `SEESTAR_WG_SUBNET` | `10.99.0.0/24` | WireGuard tunnel subnet |
+| `--wg-key-file <PATH>` | `SEESTAR_WG_KEY_FILE` | `~/.seestar-proxy/wg.key` | WireGuard key file |
+| `--wg-endpoint <HOST:PORT>` | `SEESTAR_WG_ENDPOINT` | auto-detect | External endpoint for client config |
+| `--tailscale` | `SEESTAR_TAILSCALE` | off | Enable embedded Tailscale node |
+| `--ts-hostname <NAME>` | `SEESTAR_TS_HOSTNAME` | `seestar-proxy` | Tailscale node name |
+| `--ts-authkey <KEY>` | `SEESTAR_TS_AUTHKEY` | — | Tailscale auth key (headless setup) |
+| `--ntp-sync` | `SEESTAR_NTP_SYNC` | off | Sync system clock via NTP before start |
+| `--ntp-server <HOST>` | `SEESTAR_NTP_SERVER` | `pool.ntp.org` | NTP server to query |
+| `-v, --verbose` | — | info | Increase log verbosity (repeat for debug/trace) |
+| `-c, --config <PATH>` | `SEESTAR_CONFIG` | — | Path to TOML config file |
 
 ---
 
@@ -114,6 +146,7 @@ The most stateful component. It maintains a single upstream connection to the te
 4. The original ID and the client's response channel are stored in a `ControlState` map keyed by the remapped ID.
 5. When the telescope responds, the proxy looks up the remapped ID, restores the original ID, and delivers the response to the correct client.
 6. Async events (no `id` field) are broadcast to all connected clients.
+7. Each message is also passed through the `HookEngine` before forwarding (if hooks are loaded).
 
 **Internal task layout:**
 
@@ -186,9 +219,71 @@ Only frames with image data (type IDs 20, 21, 23) are saved; handshake frames ar
 
 ---
 
+### `dashboard.rs` — HTTP Status Dashboard
+
+Serves a live status page on port 4090 (configurable via `--dashboard-port`, disable with `0`).
+
+**Routes:**
+
+| Route | Description |
+|-------|-------------|
+| `GET /` | HTML dashboard with real-time stats |
+| `GET /api/stream` | Server-Sent Events — stats + traffic log at 1 Hz |
+| `GET /api/stats` | JSON snapshot (one-shot poll) |
+
+The dashboard reads from `Arc<Metrics>` and, if WireGuard is enabled, displays the peer config as a QR code. It uses [axum](https://github.com/tokio-rs/axum) for routing.
+
+---
+
+### `metrics.rs` — Runtime Metrics
+
+Shared atomic counters updated by `control.rs` and `imaging.rs` and read by the dashboard. Also maintains a bounded ring buffer of recent traffic log entries for the dashboard's live log view.
+
+Key counters: `control_rx`, `control_tx`, `control_events`, `imaging_frames`, `imaging_bytes`, `control_clients`, `imaging_clients`, `upstream_control_up`, `upstream_imaging_up`.
+
+---
+
+### `hooks.rs` — Lua Scripting Engine
+
+Loads one or more Lua scripts (via `--hook <path>`) into a shared `HookEngine`. Scripts can intercept traffic at several points in the proxy pipeline.
+
+The engine checks at load time which hook functions are defined and skips calls for undefined hooks with no overhead. A runtime error in a hook is logged as a warning and the message is forwarded unchanged — a buggy script never crashes or blocks the proxy.
+
+See [doc/hooks.md](hooks.md) for the full Lua API reference.
+
+---
+
+### `transparent.rs` — Transparent Proxy (Linux)
+
+Extracts the original destination address from a TCP connection that was redirected by an iptables `REDIRECT` rule, using `getsockopt(SOL_IP, SO_ORIGINAL_DST)`. Enabled via `--transparent`.
+
+This allows the proxy to intercept traffic from devices that connect directly to the telescope's IP without any client-side reconfiguration. Linux-only; returns `None` on other platforms.
+
+---
+
+### `ntp.rs` — NTP Clock Sync (feature = "ntp")
+
+Queries an NTP server via plain UDP and sets the system clock if the offset exceeds a threshold (5 seconds). Runs once at startup before any proxy tasks are spawned.
+
+Useful for headless Raspberry Pi devices that lack a real-time clock and may boot with a significantly wrong clock, which would cause TLS certificate validation failures and incorrect log timestamps.
+
+---
+
+### `wireguard.rs` — WireGuard Endpoint (feature = "wireguard")
+
+Embeds a WireGuard VPN endpoint so the proxy is reachable from any network. On startup, a keypair is generated (or loaded from `--wg-key-file`), and a peer config + QR code are printed to the terminal and displayed in the dashboard.
+
+---
+
+### `tailscale.rs` — Tailscale Node (feature = "tailscale")
+
+Embeds a Tailscale node so the proxy joins a tailnet and becomes reachable via Tailscale addresses. Configured via `--tailscale`, `--ts-hostname`, `--ts-authkey`.
+
+---
+
 ## Concurrency Model
 
-The proxy is fully async using [Tokio](https://tokio.rs/). All I/O is non-blocking and tasks communicate through channels rather than shared locks wherever possible. Locks (`Mutex`) are used only where shared mutable state is unavoidable (the pending-request map and recorder file handles).
+The proxy is fully async using [Tokio](https://tokio.rs/). All I/O is non-blocking and tasks communicate through channels rather than shared locks wherever possible. Locks (`Mutex`) are used only where shared mutable state is unavoidable (the pending-request map, recorder file handles, and the Lua engine).
 
 ```
 main()
@@ -202,7 +297,9 @@ main()
 │   ├── upstream_reader_task
 │   └── handle_client()  ×N clients
 │
-└── discovery::run()
+├── discovery::run()
+│
+└── dashboard::run()
 ```
 
 A single client failure (disconnect, bad data) is logged and the client task exits cleanly—it does not affect other clients or the upstream connection. Upstream connection loss terminates the affected proxy task (control or imaging) but not the entire process.
@@ -221,9 +318,21 @@ cargo build
 cargo build --release
 # Binary: target/release/seestar-proxy
 
+# Without WireGuard (smaller binary)
+cargo build --release --no-default-features
+
 # Cross-compile for Pi (requires cross)
-cross build --release --target aarch64-unknown-linux-gnu
+cross build --release --target aarch64-unknown-linux-musl
+cross build --release --target armv7-unknown-linux-musleabihf
 ```
+
+**Feature flags:**
+
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `wireguard` | on | Embedded WireGuard VPN endpoint |
+| `ntp` | off | NTP clock sync at startup |
+| `tailscale` | off | Embedded Tailscale node |
 
 **Example invocation:**
 
@@ -246,3 +355,9 @@ Binary frames can be large (up to tens of MB). Wrapping them in `Arc` lets the b
 
 **Discovery address substitution**
 Clients use UDP discovery to find the telescope. By intercepting and rewriting discovery responses, the proxy makes itself transparent—clients connect to the proxy without knowing it exists.
+
+**Lua hooks for extensibility without recompilation**
+Rather than hard-coding filtering rules, the proxy exposes a Lua scripting interface. Users can block commands, modify messages, throttle polling, or inject synthetic responses without touching the proxy source code. Hooks are optional and have zero overhead when not loaded.
+
+**Shared metrics via atomics**
+All counters in `metrics.rs` use atomics (`AtomicU64`, `AtomicBool`, etc.) so the dashboard can read them without taking locks, keeping dashboard reads cheap even under heavy traffic.
