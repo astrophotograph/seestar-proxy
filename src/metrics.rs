@@ -15,7 +15,10 @@ pub struct TelescopeStatusSnapshot {
     pub is_stacking: bool,
     pub stack_count: i64,
     pub is_goto: bool,
+    pub is_homing: bool,
+    pub tracking: bool,
     pub view_mode: Option<String>,
+    pub charger_status: Option<String>,
     pub last_event: Option<String>,
     pub last_event_ts_ms: u64,
 }
@@ -130,7 +133,12 @@ impl Metrics {
                 .as_millis() as u64;
             match event_name {
                 "PiStatus" => {
-                    if let Some(v) = msg.get("battery_capacity").and_then(|v| v.as_i64()) {
+                    // battery_capacity may arrive as integer or float in JSON
+                    if let Some(v) = msg
+                        .get("battery_capacity")
+                        .and_then(|v| v.as_f64())
+                        .map(|v| v.round() as i64)
+                    {
                         s.battery = Some(v);
                     }
                     if let Some(v) = msg.get("temp").and_then(|v| v.as_f64()) {
@@ -146,10 +154,43 @@ impl Metrics {
                 "AutoGoto" | "ScopeGoto" => {
                     s.is_goto = true;
                 }
+                "ScopeHome" => {
+                    let state = msg.get("state").and_then(|v| v.as_str()).unwrap_or("");
+                    s.is_homing = state == "working";
+                }
+                "ScopeTrack" => {
+                    s.tracking = msg
+                        .get("tracking")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                }
                 "View" => {
                     s.view_mode = msg.get("mode").and_then(|v| v.as_str()).map(str::to_string);
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Update telescope status from a ctrl-rx response (e.g. get_device_state).
+    pub fn update_response(&self, msg: &serde_json::Value) {
+        let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        if method == "get_device_state"
+            && let Some(pi) = msg.get("result").and_then(|r| r.get("pi_status"))
+            && let Ok(mut s) = self.telescope_status.lock()
+        {
+            if let Some(v) = pi
+                .get("battery_capacity")
+                .and_then(|v| v.as_f64())
+                .map(|v| v.round() as i64)
+            {
+                s.battery = Some(v);
+            }
+            if let Some(v) = pi.get("temp").and_then(|v| v.as_f64()) {
+                s.temperature = Some(v);
+            }
+            if let Some(v) = pi.get("charger_status").and_then(|v| v.as_str()) {
+                s.charger_status = Some(v.to_string());
             }
         }
     }
@@ -160,6 +201,7 @@ impl Metrics {
             s.is_stacking = false;
             s.stack_count = 0;
             s.is_goto = false;
+            s.is_homing = false;
         }
     }
 

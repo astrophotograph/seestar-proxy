@@ -695,6 +695,7 @@ async fn upstream_reader_task(
                             method.to_string(),
                             Some(response_str.clone()),
                         );
+                        m.update_response(&response);
                     }
 
                     if pending.client_tx.send(response_str).await.is_err() {

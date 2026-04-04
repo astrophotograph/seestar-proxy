@@ -213,7 +213,9 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     </div>
     <div class="divider"></div>
     <div class="crow"><span class="clab">battery</span><span class="cval" id="ts-batt">—</span></div>
+    <div class="crow"><span class="clab">charger</span><span class="cval" id="ts-charge">—</span></div>
     <div class="crow"><span class="clab">temperature</span><span class="cval" id="ts-temp">—</span></div>
+    <div class="crow"><span class="clab">tracking</span><span class="cval" id="ts-track">—</span></div>
     <div class="crow"><span class="clab">view mode</span><span class="cval" id="ts-view">—</span></div>
     <div class="crow"><span class="clab">stack frames</span><span class="cval" id="ts-stack">—</span></div>
     <div class="divider"></div>
@@ -303,27 +305,32 @@ function update(s) {
 
 function updateTelescopeStatus(ts) {
   const statusEl = document.getElementById('ts-status');
+  function badge(cls, color, label) {
+    statusEl.className = 'sbadge';
+    statusEl.style.color = color ? 'var(--' + color + ')' : '';
+    const glow = color ? ';box-shadow:0 0 6px var(--' + color + ')' : '';
+    const bg = color ? 'background:var(--' + color + ')' + glow : '';
+    statusEl.innerHTML = '<span class="sled" style="' + bg + '"></span><span>' + label + '</span>';
+  }
   if (ts.is_goto) {
-    statusEl.className = 'sbadge';
-    statusEl.style.color = 'var(--orange)';
-    statusEl.innerHTML = '<span class="sled" style="background:var(--orange);box-shadow:0 0 6px var(--orange)"></span><span>GoTo</span>';
+    badge('', 'orange', 'GoTo');
   } else if (ts.is_stacking) {
-    statusEl.className = 'sbadge';
-    statusEl.style.color = 'var(--purple)';
-    statusEl.innerHTML = '<span class="sled" style="background:var(--purple);box-shadow:0 0 6px var(--purple)"></span><span>Stacking</span>';
+    badge('', 'purple', 'Stacking');
+  } else if (ts.is_homing) {
+    badge('', 'cyan', 'Homing');
   } else if (ts.last_event) {
-    statusEl.className = 'sbadge up';
-    statusEl.style.color = '';
-    statusEl.innerHTML = '<span class="sled"></span><span>Idle</span>';
+    const label = ts.tracking ? 'Tracking' : 'Idle';
+    badge('up', 'green', label);
   } else {
-    statusEl.className = 'sbadge down';
-    statusEl.style.color = '';
-    statusEl.innerHTML = '<span class="sled"></span><span>—</span>';
+    badge('down', null, '—');
   }
   document.getElementById('ts-batt').textContent =
     ts.battery != null ? ts.battery + '%' : '—';
+  document.getElementById('ts-charge').textContent = ts.charger_status || '—';
   document.getElementById('ts-temp').textContent =
     ts.temperature != null ? ts.temperature.toFixed(1) + '\u00b0C' : '—';
+  document.getElementById('ts-track').textContent =
+    ts.last_event ? (ts.tracking ? 'on' : 'off') : '—';
   document.getElementById('ts-view').textContent = ts.view_mode || '—';
   document.getElementById('ts-stack').textContent =
     ts.is_stacking ? ts.stack_count : '—';
