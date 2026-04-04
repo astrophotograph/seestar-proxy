@@ -481,6 +481,11 @@ async fn handle_client(
 
             if upstream_tx.send(forwarded).await.is_err() {
                 error!("Upstream channel closed — telescope connection lost");
+                // The message was never delivered, so the pending entry will
+                // never receive a response.  Remove it now rather than leaking
+                // it until the next reconnect cycle.
+                let mut st = state.lock().await;
+                st.pending.remove(&remapped_id);
                 break;
             }
         } else {
@@ -690,9 +695,9 @@ async fn upstream_reader_task(
                         );
                     }
 
-                    if pending.client_tx.try_send(response_str).is_err() {
+                    if pending.client_tx.send(response_str).await.is_err() {
                         warn!(
-                            "Client channel full/closed for id {:?}",
+                            "Client disconnected before response could be delivered for id {:?}",
                             pending.original_id
                         );
                     }
@@ -721,8 +726,16 @@ async fn upstream_reader_task(
         }
 
         if buf.len() > 1_000_000 {
-            warn!("Buffer overflow ({} bytes), clearing", buf.len());
-            buf.clear();
+            // A partial line this large is almost certainly malformed data.
+            // Clearing and continuing would cause the tail of this oversized
+            // message to be parsed as a new (invalid) JSON line.  Disconnect
+            // instead so the reconnect loop can clean up pending requests and
+            // start fresh.
+            error!(
+                "Buffer overflow ({} bytes), disconnecting upstream",
+                buf.len()
+            );
+            break;
         }
     }
 
