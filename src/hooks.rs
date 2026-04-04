@@ -167,11 +167,21 @@ impl HookEngine {
 
     /// Call on_upstream_connect hook (fired when the upstream TCP connection is established).
     pub async fn on_upstream_connect(&self, addr: &str) {
-        if !self.has_on_upstream_connect {
-            return;
-        }
         let lua = self.lua.lock().await;
-        if let Ok(func) = lua.globals().get::<LuaFunction>("on_upstream_connect")
+
+        // Always reset transient telescope state on (re)connect.  Without this,
+        // flags like is_goto and is_stacking can only ever go from false → true
+        // and remain stuck for the lifetime of the proxy even after the operation
+        // has completed or the connection was lost.
+        if let Ok(telescope) = lua.globals().get::<LuaTable>("telescope") {
+            let _ = telescope.set("is_goto", false);
+            let _ = telescope.set("is_stacking", false);
+            let _ = telescope.set("stack_count", 0i64);
+            let _ = telescope.set("view_mode", LuaNil);
+        }
+
+        if self.has_on_upstream_connect
+            && let Ok(func) = lua.globals().get::<LuaFunction>("on_upstream_connect")
             && let Err(e) = func.call::<()>(addr.to_string())
         {
             warn!("on_upstream_connect hook error: {}", e);
@@ -521,6 +531,77 @@ mod tests {
 
         let msg = json!({"id": 1, "method": "test"});
         assert_eq!(engine.on_request(&msg).await, HookAction::Forward);
+    }
+
+    /// Bug regression: is_goto and is_stacking were never cleared back to false.
+    /// Once set they stayed true for the lifetime of the process — including
+    /// across telescope reconnects.  on_upstream_connect must reset them.
+    #[tokio::test]
+    async fn upstream_reconnect_resets_transient_telescope_state() {
+        let script = write_script(
+            r#"
+            function on_request(msg)
+                if telescope.is_stacking then return "block" end
+                if telescope.is_goto    then return "block" end
+                return "forward"
+            end
+        "#,
+        );
+        let engine = HookEngine::new(&[script.path()]).unwrap();
+        let req = json!({"id": 1, "method": "get_device_state"});
+
+        // Simulate a Stack event — sets is_stacking = true.
+        engine
+            .update_telescope_state(&json!({"Event": "Stack", "count": 3}))
+            .await;
+        assert_eq!(engine.on_request(&req).await, HookAction::Block);
+
+        // Simulate a ScopeGoto event — sets is_goto = true.
+        engine
+            .update_telescope_state(&json!({"Event": "ScopeGoto"}))
+            .await;
+
+        // Reconnect must clear both flags even with no on_upstream_connect hook.
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+        assert_eq!(
+            engine.on_request(&req).await,
+            HookAction::Forward,
+            "is_stacking and is_goto must be false after reconnect"
+        );
+    }
+
+    /// stack_count must also be reset to 0 on reconnect so scripts that
+    /// use it as a relative counter don't see stale accumulated values.
+    #[tokio::test]
+    async fn upstream_reconnect_resets_stack_count() {
+        let script = write_script(
+            r#"
+            function on_request(msg)
+                return tostring(telescope.stack_count)
+            end
+        "#,
+        );
+        let engine = HookEngine::new(&[script.path()]).unwrap();
+
+        engine
+            .update_telescope_state(&json!({"Event": "Stack", "count": 42}))
+            .await;
+
+        // Before reconnect: stack_count = 42, so the hook returns "42" (a Modify action).
+        let before = engine.on_request(&json!({"id": 1, "method": "x"})).await;
+        assert!(
+            matches!(&before, HookAction::Modify(s) if s == "42"),
+            "expected Modify(\"42\"), got {before:?}"
+        );
+
+        engine.on_upstream_connect("192.168.1.1:4700").await;
+
+        // After reconnect: stack_count must be 0.
+        let after = engine.on_request(&json!({"id": 1, "method": "x"})).await;
+        assert!(
+            matches!(&after, HookAction::Modify(s) if s == "0"),
+            "expected Modify(\"0\") after reconnect, got {after:?}"
+        );
     }
 }
 
