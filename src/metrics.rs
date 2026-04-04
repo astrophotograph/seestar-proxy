@@ -377,4 +377,277 @@ mod tests {
         assert!(m.log_since(Some(0)).is_empty());
         assert!(m.log_since(Some(99)).is_empty());
     }
+
+    // ── telescope status: initial state ──────────────────────────────────────
+
+    #[test]
+    fn telescope_status_defaults_to_empty() {
+        let m = Metrics::new();
+        let s = m.telescope_status();
+        assert!(s.battery.is_none());
+        assert!(s.temperature.is_none());
+        assert!(s.charger_status.is_none());
+        assert!(!s.is_stacking);
+        assert_eq!(s.stack_count, 0);
+        assert!(!s.is_goto);
+        assert!(!s.is_homing);
+        assert!(!s.tracking);
+        assert!(s.view_mode.is_none());
+        assert!(s.last_event.is_none());
+        assert_eq!(s.last_event_ts_ms, 0);
+    }
+
+    // ── update_event: PiStatus ────────────────────────────────────────────────
+
+    #[test]
+    fn update_event_pi_status_sets_temperature() {
+        let m = Metrics::new();
+        m.update_event(
+            "PiStatus",
+            &serde_json::json!({"Event": "PiStatus", "temp": 42.5}),
+        );
+        assert_eq!(m.telescope_status().temperature, Some(42.5));
+    }
+
+    #[test]
+    fn update_event_pi_status_battery_integer() {
+        let m = Metrics::new();
+        m.update_event(
+            "PiStatus",
+            &serde_json::json!({"Event": "PiStatus", "battery_capacity": 75}),
+        );
+        assert_eq!(m.telescope_status().battery, Some(75));
+    }
+
+    #[test]
+    fn update_event_pi_status_battery_float_is_rounded() {
+        let m = Metrics::new();
+        m.update_event(
+            "PiStatus",
+            &serde_json::json!({"Event": "PiStatus", "battery_capacity": 74.6}),
+        );
+        assert_eq!(m.telescope_status().battery, Some(75));
+    }
+
+    #[test]
+    fn update_event_pi_status_missing_battery_leaves_existing_value() {
+        let m = Metrics::new();
+        m.update_event(
+            "PiStatus",
+            &serde_json::json!({"Event": "PiStatus", "battery_capacity": 50}),
+        );
+        // Second update without battery_capacity must not clear what was set.
+        m.update_event(
+            "PiStatus",
+            &serde_json::json!({"Event": "PiStatus", "temp": 40.0}),
+        );
+        assert_eq!(m.telescope_status().battery, Some(50));
+    }
+
+    // ── update_event: Stack ───────────────────────────────────────────────────
+
+    #[test]
+    fn update_event_stack_sets_stacking_and_count() {
+        let m = Metrics::new();
+        m.update_event("Stack", &serde_json::json!({"Event": "Stack", "count": 12}));
+        let s = m.telescope_status();
+        assert!(s.is_stacking);
+        assert_eq!(s.stack_count, 12);
+    }
+
+    #[test]
+    fn update_event_stack_without_count_still_sets_is_stacking() {
+        let m = Metrics::new();
+        m.update_event("Stack", &serde_json::json!({"Event": "Stack"}));
+        assert!(m.telescope_status().is_stacking);
+    }
+
+    // ── update_event: AutoGoto / ScopeGoto ───────────────────────────────────
+
+    #[test]
+    fn update_event_autogoto_sets_is_goto() {
+        let m = Metrics::new();
+        m.update_event("AutoGoto", &serde_json::json!({"Event": "AutoGoto"}));
+        assert!(m.telescope_status().is_goto);
+    }
+
+    #[test]
+    fn update_event_scopegoto_sets_is_goto() {
+        let m = Metrics::new();
+        m.update_event("ScopeGoto", &serde_json::json!({"Event": "ScopeGoto"}));
+        assert!(m.telescope_status().is_goto);
+    }
+
+    // ── update_event: ScopeHome ───────────────────────────────────────────────
+
+    #[test]
+    fn update_event_scope_home_working_sets_is_homing() {
+        let m = Metrics::new();
+        m.update_event(
+            "ScopeHome",
+            &serde_json::json!({"Event": "ScopeHome", "state": "working"}),
+        );
+        assert!(m.telescope_status().is_homing);
+    }
+
+    #[test]
+    fn update_event_scope_home_complete_clears_is_homing() {
+        let m = Metrics::new();
+        m.update_event(
+            "ScopeHome",
+            &serde_json::json!({"Event": "ScopeHome", "state": "working"}),
+        );
+        m.update_event(
+            "ScopeHome",
+            &serde_json::json!({"Event": "ScopeHome", "state": "complete"}),
+        );
+        assert!(!m.telescope_status().is_homing);
+    }
+
+    // ── update_event: ScopeTrack ──────────────────────────────────────────────
+
+    #[test]
+    fn update_event_scope_track_true_sets_tracking() {
+        let m = Metrics::new();
+        m.update_event(
+            "ScopeTrack",
+            &serde_json::json!({"Event": "ScopeTrack", "tracking": true}),
+        );
+        assert!(m.telescope_status().tracking);
+    }
+
+    #[test]
+    fn update_event_scope_track_false_clears_tracking() {
+        let m = Metrics::new();
+        m.update_event(
+            "ScopeTrack",
+            &serde_json::json!({"Event": "ScopeTrack", "tracking": true}),
+        );
+        m.update_event(
+            "ScopeTrack",
+            &serde_json::json!({"Event": "ScopeTrack", "tracking": false}),
+        );
+        assert!(!m.telescope_status().tracking);
+    }
+
+    // ── update_event: View ────────────────────────────────────────────────────
+
+    #[test]
+    fn update_event_view_sets_view_mode() {
+        let m = Metrics::new();
+        m.update_event(
+            "View",
+            &serde_json::json!({"Event": "View", "mode": "star"}),
+        );
+        assert_eq!(m.telescope_status().view_mode.as_deref(), Some("star"));
+    }
+
+    // ── update_event: last_event bookkeeping ─────────────────────────────────
+
+    #[test]
+    fn update_event_sets_last_event_and_nonzero_timestamp() {
+        let m = Metrics::new();
+        m.update_event("ScopeTrack", &serde_json::json!({"Event": "ScopeTrack"}));
+        let s = m.telescope_status();
+        assert_eq!(s.last_event.as_deref(), Some("ScopeTrack"));
+        assert!(s.last_event_ts_ms > 0, "timestamp must be set");
+    }
+
+    #[test]
+    fn update_event_unknown_event_still_records_last_event() {
+        let m = Metrics::new();
+        m.update_event("Mystery", &serde_json::json!({"Event": "Mystery"}));
+        assert_eq!(m.telescope_status().last_event.as_deref(), Some("Mystery"));
+    }
+
+    // ── reset_telescope_state ─────────────────────────────────────────────────
+
+    #[test]
+    fn reset_telescope_state_clears_transient_flags() {
+        let m = Metrics::new();
+        m.update_event("Stack", &serde_json::json!({"Event": "Stack", "count": 5}));
+        m.update_event("AutoGoto", &serde_json::json!({"Event": "AutoGoto"}));
+        m.update_event(
+            "ScopeHome",
+            &serde_json::json!({"Event": "ScopeHome", "state": "working"}),
+        );
+        m.reset_telescope_state();
+        let s = m.telescope_status();
+        assert!(!s.is_stacking);
+        assert_eq!(s.stack_count, 0);
+        assert!(!s.is_goto);
+        assert!(!s.is_homing);
+    }
+
+    #[test]
+    fn reset_telescope_state_preserves_battery_and_temperature() {
+        let m = Metrics::new();
+        m.update_event(
+            "PiStatus",
+            &serde_json::json!({"Event": "PiStatus", "temp": 45.0, "battery_capacity": 80}),
+        );
+        m.reset_telescope_state();
+        let s = m.telescope_status();
+        assert_eq!(s.temperature, Some(45.0));
+        assert_eq!(s.battery, Some(80));
+    }
+
+    // ── update_response ───────────────────────────────────────────────────────
+
+    #[test]
+    fn update_response_get_device_state_sets_battery() {
+        let m = Metrics::new();
+        m.update_response(&serde_json::json!({
+            "method": "get_device_state",
+            "result": { "pi_status": { "battery_capacity": 63 } }
+        }));
+        assert_eq!(m.telescope_status().battery, Some(63));
+    }
+
+    #[test]
+    fn update_response_get_device_state_battery_float_is_rounded() {
+        let m = Metrics::new();
+        m.update_response(&serde_json::json!({
+            "method": "get_device_state",
+            "result": { "pi_status": { "battery_capacity": 62.7 } }
+        }));
+        assert_eq!(m.telescope_status().battery, Some(63));
+    }
+
+    #[test]
+    fn update_response_get_device_state_sets_temperature_and_charger() {
+        let m = Metrics::new();
+        m.update_response(&serde_json::json!({
+            "method": "get_device_state",
+            "result": {
+                "pi_status": {
+                    "temp": 38.5,
+                    "charger_status": "Charging"
+                }
+            }
+        }));
+        let s = m.telescope_status();
+        assert_eq!(s.temperature, Some(38.5));
+        assert_eq!(s.charger_status.as_deref(), Some("Charging"));
+    }
+
+    #[test]
+    fn update_response_ignores_other_methods() {
+        let m = Metrics::new();
+        m.update_response(&serde_json::json!({
+            "method": "get_view_state",
+            "result": { "pi_status": { "battery_capacity": 99 } }
+        }));
+        assert!(m.telescope_status().battery.is_none());
+    }
+
+    #[test]
+    fn update_response_missing_pi_status_is_a_noop() {
+        let m = Metrics::new();
+        m.update_response(&serde_json::json!({
+            "method": "get_device_state",
+            "result": { "device": { "firmware_ver_int": 2430 } }
+        }));
+        assert!(m.telescope_status().battery.is_none());
+    }
 }
