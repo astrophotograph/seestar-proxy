@@ -1140,6 +1140,144 @@ mod tests {
         assert_eq!(v["Event"], "PartialData");
     }
 
+    /// Bug regression: try_send silently dropped responses when the client's
+    /// response channel was full.  With send().await the task blocks until the
+    /// channel has space, so the response is always delivered.
+    #[tokio::test]
+    async fn full_response_channel_does_not_drop_response() {
+        // Capacity-1 channel, pre-filled so send().await must block until drained.
+        let (client_tx, mut client_rx) = mpsc::channel::<String>(1);
+        client_tx.try_send("placeholder".to_string()).unwrap();
+
+        let (mut mock_telescope, reader) = loopback_read_half().await;
+        let (event_tx, _) = broadcast::channel::<String>(16);
+        let state = pending_state(10000, client_tx, 42);
+        let handshake_done = Arc::new(AtomicBool::new(false));
+
+        tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
+
+        // Trigger the task to try delivering a response to the full channel.
+        mock_telescope
+            .write_all(b"{\"id\":10000,\"code\":0}\r\n")
+            .await
+            .unwrap();
+
+        // Give the task time to receive the message and block on send().await.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        // Drain the placeholder — this unblocks the send().await in the task.
+        let first = client_rx.recv().await.unwrap();
+        assert_eq!(first, "placeholder");
+
+        // The actual response must now arrive (was not dropped).
+        let response = tokio::time::timeout(Duration::from_secs(1), client_rx.recv())
+            .await
+            .expect("response was not delivered after channel drained — was it dropped?")
+            .expect("channel closed unexpectedly");
+
+        let v: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(v["id"], 42, "original id must be restored");
+        assert_eq!(v["code"], 0);
+    }
+
+    /// Bug regression: when upstream_tx.send() failed after a pending entry was
+    /// already inserted, the entry leaked in the map until the next reconnect.
+    /// Now the entry is removed before breaking out of the read loop.
+    #[tokio::test]
+    async fn pending_entry_removed_when_upstream_send_fails() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client_stream = TcpStream::connect(addr).await.unwrap();
+        let (mut test_side, _) = listener.accept().await.unwrap();
+
+        // Drop the receiver so every upstream send() returns Err immediately.
+        let (upstream_tx, upstream_rx) = mpsc::channel::<String>(1);
+        drop(upstream_rx);
+
+        let (_event_tx, event_rx) = broadcast::channel::<String>(16);
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
+        let next_id = Arc::new(AtomicU64::new(100_000));
+
+        let state_c = state.clone();
+        let task = tokio::spawn(handle_client(
+            client_stream,
+            upstream_tx,
+            event_rx,
+            state_c,
+            next_id,
+            None,
+            None,
+            None,
+        ));
+
+        // Send a request with an id so it gets inserted into the pending map
+        // before the send fails.
+        test_side
+            .write_all(b"{\"id\":1,\"method\":\"test\",\"params\":\"verify\"}\r\n")
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("handle_client did not exit after upstream send failure")
+            .unwrap() // JoinError
+            .unwrap(); // anyhow::Error
+
+        let st = state.lock().await;
+        assert!(
+            st.pending.is_empty(),
+            "pending entry must be removed when upstream send fails, got {} entries",
+            st.pending.len()
+        );
+    }
+
+    /// Bug regression: on buffer overflow the old code called buf.clear() and
+    /// continued, which caused the tail of the oversized message to be parsed as
+    /// a new (malformed) JSON line on the next newline.  The fix breaks out of
+    /// the loop so a clean reconnect can happen instead.
+    #[tokio::test]
+    async fn buffer_overflow_disconnects_upstream() {
+        let (mut mock_telescope, reader) = loopback_read_half().await;
+        let state = Arc::new(Mutex::new(ControlState {
+            pending: HashMap::new(),
+        }));
+        let (event_tx, _) = broadcast::channel::<String>(16);
+        let handshake_done = Arc::new(AtomicBool::new(false));
+
+        let task = tokio::spawn(upstream_reader_task(
+            reader,
+            state,
+            event_tx,
+            None,
+            handshake_done,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
+
+        // Send more than 1 MB without any newline — saturates the internal buffer.
+        let junk = vec![b'x'; 1_100_000];
+        mock_telescope.write_all(&junk).await.unwrap();
+        mock_telescope.flush().await.unwrap();
+
+        // Task must exit cleanly rather than clearing and continuing.
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("upstream_reader_task did not disconnect on buffer overflow")
+            .unwrap();
+    }
+
     // ── ID counter ────────────────────────────────────────────────────────────
 
     #[test]
