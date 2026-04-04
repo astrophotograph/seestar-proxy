@@ -160,6 +160,9 @@ pub async fn run(
 
                 // Reset per-connection state.
                 handshake_done.store(false, Ordering::Relaxed);
+                if let Some(m) = &metrics_up {
+                    m.reset_telescope_state();
+                }
                 {
                     // Return errors to any clients waiting on in-flight requests
                     // from the previous connection — they will never be answered.
@@ -647,6 +650,7 @@ async fn upstream_reader_task(
                         event_name.to_string(),
                         Some(trimmed.clone()),
                     );
+                    m.update_event(event_name, &msg);
                 }
 
                 // Run event hook.

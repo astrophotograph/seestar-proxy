@@ -77,7 +77,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .sub{font-size:11px;color:var(--muted)}
 
 /* Mid row */
-.mid{display:grid;grid-template-columns:1fr 248px;gap:12px;margin-bottom:12px}
+.mid{display:grid;grid-template-columns:1fr 220px 200px;gap:12px;margin-bottom:12px}
+@media(max-width:900px){.mid{grid-template-columns:1fr 220px}}
 @media(max-width:720px){.mid{grid-template-columns:1fr}}
 .panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
 .ptitle{font-size:10px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:12px;display:flex;align-items:center;gap:6px}
@@ -204,6 +205,21 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
     <div class="crow"><span class="clab">events broadcast</span><span class="cval" id="evc">0</span></div>
     <div class="crow"><span class="clab">img bytes total</span><span class="cval" id="ibc">0 B</span></div>
   </div>
+  <div class="panel">
+    <div class="ptitle"><span class="pdot"></span>Telescope</div>
+    <div class="srow">
+      <span class="sname">status</span>
+      <span id="ts-status" class="sbadge down"><span class="sled"></span><span>—</span></span>
+    </div>
+    <div class="divider"></div>
+    <div class="crow"><span class="clab">battery</span><span class="cval" id="ts-batt">—</span></div>
+    <div class="crow"><span class="clab">temperature</span><span class="cval" id="ts-temp">—</span></div>
+    <div class="crow"><span class="clab">view mode</span><span class="cval" id="ts-view">—</span></div>
+    <div class="crow"><span class="clab">stack frames</span><span class="cval" id="ts-stack">—</span></div>
+    <div class="divider"></div>
+    <div class="crow"><span class="clab">last event</span><span class="cval" id="ts-evt">—</span></div>
+    <div class="crow"><span class="clab">event age</span><span class="cval" id="ts-age">—</span></div>
+  </div>
 </div>
 
 <!-- WG_SECTION -->
@@ -282,6 +298,43 @@ function update(s) {
   ih.push(s.imaging_frame_rate); if (ih.length > N) ih.shift();
   drawChart();
   if (s.log_entries && s.log_entries.length) appendLog(s.log_entries);
+  if (s.telescope_status) updateTelescopeStatus(s.telescope_status);
+}
+
+function updateTelescopeStatus(ts) {
+  const statusEl = document.getElementById('ts-status');
+  if (ts.is_goto) {
+    statusEl.className = 'sbadge';
+    statusEl.style.color = 'var(--orange)';
+    statusEl.innerHTML = '<span class="sled" style="background:var(--orange);box-shadow:0 0 6px var(--orange)"></span><span>GoTo</span>';
+  } else if (ts.is_stacking) {
+    statusEl.className = 'sbadge';
+    statusEl.style.color = 'var(--purple)';
+    statusEl.innerHTML = '<span class="sled" style="background:var(--purple);box-shadow:0 0 6px var(--purple)"></span><span>Stacking</span>';
+  } else if (ts.last_event) {
+    statusEl.className = 'sbadge up';
+    statusEl.style.color = '';
+    statusEl.innerHTML = '<span class="sled"></span><span>Idle</span>';
+  } else {
+    statusEl.className = 'sbadge down';
+    statusEl.style.color = '';
+    statusEl.innerHTML = '<span class="sled"></span><span>—</span>';
+  }
+  document.getElementById('ts-batt').textContent =
+    ts.battery != null ? ts.battery + '%' : '—';
+  document.getElementById('ts-temp').textContent =
+    ts.temperature != null ? ts.temperature.toFixed(1) + '\u00b0C' : '—';
+  document.getElementById('ts-view').textContent = ts.view_mode || '—';
+  document.getElementById('ts-stack').textContent =
+    ts.is_stacking ? ts.stack_count : '—';
+  document.getElementById('ts-evt').textContent = ts.last_event || '—';
+  if (ts.last_event_ts_ms) {
+    const age = Math.round((Date.now() - ts.last_event_ts_ms) / 1000);
+    document.getElementById('ts-age').textContent =
+      age < 60 ? age + 's ago' : Math.round(age/60) + 'm ago';
+  } else {
+    document.getElementById('ts-age').textContent = '—';
+  }
 }
 
 function drawChart() {
@@ -618,6 +671,7 @@ pub(crate) fn build_payload(
         "imaging_frame_rate":  img_frame_rate,
         "imaging_bytes_rate":  img_bps as u64,
         "log_entries":         log_entries,
+        "telescope_status":    m.telescope_status(),
     })
 }
 

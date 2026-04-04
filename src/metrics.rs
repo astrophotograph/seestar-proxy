@@ -7,6 +7,19 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const LOG_CAPACITY: usize = 100;
 
+/// Latest telescope state derived from event messages.
+#[derive(Clone, Default, serde::Serialize)]
+pub struct TelescopeStatusSnapshot {
+    pub battery: Option<i64>,
+    pub temperature: Option<f64>,
+    pub is_stacking: bool,
+    pub stack_count: i64,
+    pub is_goto: bool,
+    pub view_mode: Option<String>,
+    pub last_event: Option<String>,
+    pub last_event_ts_ms: u64,
+}
+
 /// A single traffic log entry shown in the dashboard.
 #[derive(Clone, serde::Serialize)]
 pub struct LogEntry {
@@ -47,6 +60,8 @@ pub struct Metrics {
     log_seq: AtomicU64,
     /// Proxy start time (for uptime calculation).
     pub started_at: Instant,
+    /// Latest telescope state derived from event messages.
+    telescope_status: Mutex<TelescopeStatusSnapshot>,
 }
 
 impl Metrics {
@@ -64,6 +79,7 @@ impl Metrics {
             log: Mutex::new(VecDeque::with_capacity(LOG_CAPACITY)),
             log_seq: AtomicU64::new(0),
             started_at: Instant::now(),
+            telescope_status: Mutex::new(TelescopeStatusSnapshot::default()),
         })
     }
 
@@ -102,6 +118,57 @@ impl Metrics {
             }
             log.push_back(entry);
         }
+    }
+
+    /// Update telescope status from an async event message.
+    pub fn update_event(&self, event_name: &str, msg: &serde_json::Value) {
+        if let Ok(mut s) = self.telescope_status.lock() {
+            s.last_event = Some(event_name.to_string());
+            s.last_event_ts_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            match event_name {
+                "PiStatus" => {
+                    if let Some(v) = msg.get("battery_capacity").and_then(|v| v.as_i64()) {
+                        s.battery = Some(v);
+                    }
+                    if let Some(v) = msg.get("temp").and_then(|v| v.as_f64()) {
+                        s.temperature = Some(v);
+                    }
+                }
+                "Stack" => {
+                    s.is_stacking = true;
+                    if let Some(v) = msg.get("count").and_then(|v| v.as_i64()) {
+                        s.stack_count = v;
+                    }
+                }
+                "AutoGoto" | "ScopeGoto" => {
+                    s.is_goto = true;
+                }
+                "View" => {
+                    s.view_mode = msg.get("mode").and_then(|v| v.as_str()).map(str::to_string);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Reset transient telescope state on upstream reconnect.
+    pub fn reset_telescope_state(&self) {
+        if let Ok(mut s) = self.telescope_status.lock() {
+            s.is_stacking = false;
+            s.stack_count = 0;
+            s.is_goto = false;
+        }
+    }
+
+    /// Snapshot of the current telescope status for the dashboard.
+    pub fn telescope_status(&self) -> TelescopeStatusSnapshot {
+        self.telescope_status
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// Returns log entries with `seq >= from_seq`. If `from_seq` is `None`, returns all.
