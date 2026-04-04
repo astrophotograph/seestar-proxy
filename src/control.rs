@@ -430,23 +430,6 @@ async fn handle_client(
         // negative integers and strings) rather than json_rpc_id() which only
         // handles u64 values.
         if let Some(original_id) = protocol::get_id(&msg).cloned() {
-            // Enforce a pending-map size limit. When full, return an
-            // error immediately rather than queuing the request indefinitely.
-            {
-                let st = state.lock().await;
-                if st.pending.len() >= MAX_PENDING_REQUESTS {
-                    let err = serde_json::json!({
-                        "id": original_id,
-                        "code": -32000,
-                        "error": "too many pending requests"
-                    });
-                    let _ = response_tx
-                        .send(serde_json::to_string(&err).unwrap_or_default())
-                        .await;
-                    continue;
-                }
-            }
-
             let remapped_id = next_id.fetch_add(1, Ordering::Relaxed);
             protocol::set_json_rpc_id(&mut msg, remapped_id);
 
@@ -460,9 +443,24 @@ async fn handle_client(
                 }
             };
 
-            // Register the pending request.
+            // Enforce the pending-map limit and register the entry under a
+            // single lock acquisition.  Splitting the check and insert across
+            // two lock grabs (the original ordering) created a TOCTOU race:
+            // concurrent clients could each pass the size check individually
+            // and then all insert, collectively exceeding MAX_PENDING_REQUESTS.
             {
                 let mut st = state.lock().await;
+                if st.pending.len() >= MAX_PENDING_REQUESTS {
+                    let err = serde_json::json!({
+                        "id": original_id,
+                        "code": -32000,
+                        "error": "too many pending requests"
+                    });
+                    let _ = response_tx
+                        .send(serde_json::to_string(&err).unwrap_or_default())
+                        .await;
+                    continue;
+                }
                 st.pending.insert(
                     remapped_id,
                     PendingRequest {

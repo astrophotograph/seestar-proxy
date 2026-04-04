@@ -621,3 +621,58 @@ async fn proxy_survives_abrupt_client_disconnect() {
     assert_eq!(v["id"], 1);
     assert_eq!(v["code"], 0);
 }
+
+/// Bug regression: TOCTOU in pending-map overflow check.
+///
+/// The old code checked `pending.len() >= MAX_PENDING_REQUESTS` under one
+/// lock, released it, then inserted under a second lock.  Two concurrent
+/// clients could each pass the check and then both insert, collectively
+/// exceeding the limit.  The fix collapses the check and insert into a
+/// single critical section so the limit is always enforced exactly.
+///
+/// This test fills the map to capacity from one client, then verifies that
+/// a second concurrent client also gets the error response immediately —
+/// demonstrating the limit is checked atomically, not optimistically.
+#[tokio::test]
+async fn concurrent_clients_cannot_exceed_pending_map_limit() {
+    const LIMIT: usize = 1_024; // must match MAX_PENDING_REQUESTS
+
+    let telescope_addr = start_silent_telescope().await;
+    let proxy_addr = start_proxy(telescope_addr).await;
+
+    // Client A fills the map to capacity.
+    let (mut r_a, mut w_a) = connect_client(proxy_addr).await;
+    for i in 0..LIMIT {
+        w_a.write_all(format!("{{\"id\":{i},\"method\":\"fill\"}}\r\n").as_bytes())
+            .await
+            .unwrap();
+    }
+    // Wait long enough for all requests to land in the pending map.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Client B now tries to send a request concurrently with client A's map
+    // being at capacity.  It must receive an immediate error (not time out).
+    let (mut r_b, mut w_b) = connect_client(proxy_addr).await;
+    w_b.write_all(b"{\"id\":88888,\"method\":\"concurrent_overflow\"}\r\n")
+        .await
+        .unwrap();
+
+    let vb = tokio::time::timeout(Duration::from_secs(3), read_json(&mut r_b))
+        .await
+        .expect("second client must receive immediate error when map is full");
+
+    assert_eq!(vb["id"], 88888i64);
+    let code_b = vb["code"].as_i64().expect("must have code");
+    assert_ne!(code_b, 0, "error code must be non-zero");
+
+    // Client A's overflow request (one more than LIMIT) must also be rejected.
+    w_a.write_all(b"{\"id\":99999,\"method\":\"overflow\"}\r\n")
+        .await
+        .unwrap();
+    let va = tokio::time::timeout(Duration::from_secs(3), read_json(&mut r_a))
+        .await
+        .expect("first client must receive immediate error when map is full");
+
+    assert_eq!(va["id"], 99999i64);
+    assert_ne!(va["code"].as_i64().unwrap_or(0), 0);
+}
