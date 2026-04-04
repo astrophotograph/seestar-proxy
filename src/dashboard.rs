@@ -85,7 +85,8 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 .pdot{width:5px;height:5px;border-radius:50%;background:var(--muted)}
 
 /* Chart */
-#chart{width:100%;height:80px;display:block;overflow:visible}
+.chart-panel{display:flex;flex-direction:column}
+#chart{width:100%;flex:1;min-height:60px;display:block;overflow:visible}
 .legend{display:flex;gap:14px;margin-top:8px;flex-wrap:wrap}
 .leg{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--dim)}
 .ldot{width:6px;height:6px;border-radius:50%}
@@ -166,7 +167,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 </div>
 
 <div class="mid">
-  <div class="panel">
+  <div class="panel chart-panel">
     <div class="ptitle"><span class="pdot"></span>Message Rate &mdash; 60 s window</div>
     <svg id="chart" viewBox="0 0 600 80" preserveAspectRatio="none">
       <defs>
