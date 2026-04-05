@@ -69,7 +69,7 @@ The proxy enables home network mode. **First-time pairing requires the direct AP
 ./seestar-proxy --upstream 192.168.1.123 --discovery
 ```
 
-For faster startup, provide the telescope's serial number to skip the discovery probe (avoids a ~10 second delay at launch):
+Optionally, provide the telescope's serial number to skip the discovery probe at startup:
 
 ```bash
 ./seestar-proxy --upstream 192.168.1.123 --discovery --telescope-sn 4ddb0535
@@ -132,7 +132,7 @@ seestar-proxy [OPTIONS]
 | `--wg-subnet <CIDR>` | 10.99.0.0/24 | WireGuard tunnel subnet |
 | `--wg-key-file <PATH>` | ~/.seestar-proxy/wg.key | WireGuard key file |
 | `--wg-endpoint <HOST:PORT>` | auto-detect | External endpoint for client config |
-| `--telescope-sn <SN>` | — | Telescope serial number for discovery (required for iOS on home network) |
+| `--telescope-sn <SN>` | — | Telescope serial number; skips the startup discovery probe |
 | `--telescope-model <MODEL>` | Seestar S50 | Telescope model name for discovery responses |
 | `--telescope-bssid <MAC>` | — | Telescope AP BSSID for discovery responses |
 | `-v, --verbose` | info | Increase log verbosity (repeat for debug/trace) |
