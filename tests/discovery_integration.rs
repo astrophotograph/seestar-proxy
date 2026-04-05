@@ -72,18 +72,17 @@ async fn start_mock_telescope(response_ip: &'static str) -> Option<()> {
 /// Full end-to-end test of the discovery bridge.
 ///
 /// Verifies:
-///   1. The proxy fetches device info from the upstream telescope on startup.
-///   2. A client `scan_iscope` request receives a response.
-///   3. The proxy substitutes its own address in the response.
-///   4. Non-`scan_iscope` messages are silently ignored.
+///   1. A client `scan_iscope` request receives a response.
+///   2. The proxy substitutes its own address as the UDP source.
+///   3. Non-`scan_iscope` messages are silently ignored.
+///   4. Configured device-info fields are forwarded correctly.
 ///
-/// Uses two separate loopback addresses:
-///   - 127.0.0.1 → mock telescope
-///   - 127.0.0.2 → discovery proxy
+/// Uses a pre-configured identity (`telescope_sn`) to skip the upstream probe
+/// so the test is self-contained and fast.  The upstream probe path is covered
+/// separately by the `probe_upstream_skips_malformed_then_succeeds` unit test.
 ///
-/// On macOS only 127.0.0.1 is configured by default; 127.0.0.2 requires
-/// `sudo ifconfig lo0 alias 127.0.0.2`. The test skips automatically when
-/// that alias is not present.
+/// Requires 127.0.0.2 to be a usable loopback address.  On macOS this alias
+/// is not present by default; the test skips automatically when unavailable.
 #[tokio::test]
 async fn discovery_bridge_end_to_end() {
     // Check that 127.0.0.2 is a usable loopback address before proceeding.
@@ -96,22 +95,17 @@ async fn discovery_bridge_end_to_end() {
         return;
     }
 
-    // Bind the mock telescope BEFORE the proxy starts, so probe_upstream
-    // (which fires on startup) finds a live target.
-    let Some(()) = start_mock_telescope("127.0.0.1").await else {
-        return; // port 4720 occupied — skip
-    };
-
-    // Give the mock a moment to be fully ready.
-    tokio::time::sleep(Duration::from_millis(20)).await;
-
-    // Start the discovery bridge on 127.0.0.2:4720.
+    // Start the discovery bridge on 127.0.0.2:4720 with a pre-configured
+    // identity so it binds immediately without probing upstream.
     let bind_addr: IpAddr = "127.0.0.2".parse().unwrap();
     let upstream_addr: IpAddr = "127.0.0.1".parse().unwrap();
     tokio::spawn(seestar_proxy::discovery::run(
         bind_addr,
         upstream_addr,
         4700,
+        Some("TEST001".to_string()),
+        Some("Seestar S50".to_string()),
+        None,
     ));
 
     // Wait for the bridge to complete its startup probe and bind its port.
@@ -213,6 +207,9 @@ async fn discovery_probe_timeout_returns_error() {
         bind_addr,
         upstream_addr,
         4700,
+        None,
+        None,
+        None,
     ));
 
     // probe_upstream gives a minimal fallback after a 5 s timeout, so run()
@@ -230,6 +227,65 @@ async fn discovery_probe_timeout_returns_error() {
         // Still running (probe in progress or bridge listening) — that's fine.
         Err(_timeout) => {}
     }
+}
+
+/// When `telescope_sn` is provided, `run()` must skip the upstream probe and
+/// immediately serve the configured identity to clients.
+///
+/// Uses 127.0.0.5:4720 to avoid conflicts with other tests.
+#[tokio::test]
+async fn discovery_configured_identity_skips_probe_and_serves_correct_response() {
+    if tokio::net::UdpSocket::bind("127.0.0.5:0").await.is_err() {
+        eprintln!("SKIP: 127.0.0.5 not available");
+        return;
+    }
+
+    let bind_addr: IpAddr = "127.0.0.5".parse().unwrap();
+    // Point upstream at an address with nothing listening — if the probe
+    // fires it would time out, making the test slow.  With telescope_sn set
+    // the probe must be skipped entirely.
+    let upstream_addr: IpAddr = "127.0.0.6".parse().unwrap();
+
+    tokio::spawn(seestar_proxy::discovery::run(
+        bind_addr,
+        upstream_addr,
+        4700,
+        Some("TESTSN01".to_string()),
+        Some("Seestar S50".to_string()),
+        None,
+    ));
+
+    // With configured identity there is no probe delay — the bridge starts
+    // immediately.  Give it 200 ms to bind and be ready.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let req = serde_json::to_vec(&serde_json::json!({
+        "id": 201, "method": "scan_iscope", "name": "testclient", "ip": "0.0.0.0"
+    }))
+    .unwrap();
+    client
+        .send_to(&req, format!("127.0.0.5:{DISCOVERY_PORT}").as_str())
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 4096];
+    let (n, src) =
+        tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+            .await
+            .expect("timed out waiting for configured-identity discovery response")
+            .unwrap();
+
+    let response: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+
+    // Response must come from the proxy's bind address.
+    assert_eq!(src.ip().to_string(), "127.0.0.5");
+    // Configured SN and derived SSID must be present.
+    assert_eq!(response["result"]["sn"], "TESTSN01");
+    assert_eq!(response["result"]["ssid"], "S50_TESTSN01");
+    assert_eq!(response["result"]["product_model"], "Seestar S50");
+    // IP must be substituted to the proxy's bind address.
+    assert_eq!(response["result"]["ip"], "127.0.0.5");
 }
 
 /// Verify that `discovery::run` with an unspecified bind address (0.0.0.0)
@@ -254,6 +310,9 @@ async fn discovery_unspecified_bind_omits_ip_substitution() {
         bind_addr,
         upstream_addr,
         4700,
+        None,
+        None,
+        None,
     ));
 
     tokio::time::sleep(Duration::from_millis(200)).await;

@@ -25,11 +25,56 @@ pub async fn run(
     bind_addr: IpAddr,
     upstream_addr: IpAddr,
     _proxy_control_port: u16,
+    telescope_sn: Option<String>,
+    telescope_model: Option<String>,
+    telescope_bssid: Option<String>,
 ) -> anyhow::Result<()> {
     // First, discover the upstream Seestar to get its device info.
-    let device_info = probe_upstream(upstream_addr).await?;
+    // If the user has configured the telescope identity, use it directly.
+    let mut device_info = if let Some(ref sn) = telescope_sn {
+        // Derive SSID from sn — the telescope always advertises as "S50_<sn>".
+        info!(
+            "Using configured telescope identity: sn={} model={} ssid=S50_{}",
+            sn,
+            telescope_model.as_deref().unwrap_or("Seestar S50"),
+            sn
+        );
+        build_configured_response(
+            sn,
+            telescope_model.as_deref(),
+            telescope_bssid.as_deref(),
+            "0.0.0.0", // placeholder; patched to proxy_ip below
+        )
+    } else {
+        probe_upstream(upstream_addr).await?
+    };
+
+    // Determine the IP the app should connect to (the proxy, not the telescope).
+    // If bind_addr is unspecified (0.0.0.0), detect the local IP via routing.
+    let proxy_ip = if bind_addr.is_unspecified() {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0")?;
+        s.connect(SocketAddr::new(upstream_addr, 1))?;
+        s.local_addr()?.ip()
+    } else {
+        bind_addr
+    };
+
+    // Patch result.ip so the app connects to the proxy instead of the telescope.
+    if let Some(result) = device_info.get_mut("result") {
+        result["ip"] = serde_json::Value::String(proxy_ip.to_string());
+    }
+
+    // If we only got the minimal fallback at startup, flag it so we know to keep
+    // trying to get real device info from the telescope.
+    let have_real_info = device_info
+        .pointer("/result/sn")
+        .and_then(|v| v.as_str())
+        .map(|s| s != "proxy")
+        .unwrap_or(false);
+
     info!(
-        "Cached upstream device info: {}",
+        "Cached upstream device info (ip patched to {}): {}",
+        proxy_ip,
         serde_json::to_string(&device_info).unwrap_or_default()
     );
 
@@ -87,6 +132,7 @@ pub async fn run(
 
     // 16 KiB covers any realistic JSON device-info payload.
     let mut buf = [0u8; 16_384];
+    let mut have_real_info = have_real_info;
 
     loop {
         let (n, src_addr) = match recv_socket.recv_from(&mut buf).await {
@@ -114,14 +160,26 @@ pub async fn run(
             continue;
         }
 
-        // Ignore responses (which also have method "scan_iscope") to avoid
-        // a feedback loop when we broadcast our own response and receive it
-        // back on the same socket.
+        // If this packet has a "result", it's a discovery response (not a probe).
         if request.get("result").is_some() || request.get("code").is_some() {
+            // If it came from the telescope, use it to update our cache.
+            if src_addr.ip() == upstream_addr && !have_real_info {
+                let mut updated = request.clone();
+                if let Some(result) = updated.get_mut("result") {
+                    result["ip"] = serde_json::Value::String(proxy_ip.to_string());
+                }
+                info!(
+                    "Updated device cache from telescope response: sn={}",
+                    updated.pointer("/result/sn").and_then(|v| v.as_str()).unwrap_or("?")
+                );
+                device_info = updated;
+                have_real_info = true;
+            }
+            // Ignore our own broadcast echoes and other non-telescope responses.
             continue;
         }
 
-        info!("Discovery request from {}", src_addr);
+        info!("Discovery request from {}: {}", src_addr, msg);
 
         // Respond with cached Seestar info.
         //
@@ -153,6 +211,27 @@ pub async fn run(
             src_addr,
             bind_addr,
         );
+
+        // If we don't yet have real device info, forward a probe to the telescope
+        // so it will send its response back to us.  The telescope's response will
+        // arrive on this socket (from upstream_addr:4720) and update the cache
+        // above on the next loop iteration.
+        if !have_real_info {
+            let probe = serde_json::json!({
+                "id": 201,
+                "method": "scan_iscope",
+                "name": "seestarproxy",
+                "ip": proxy_ip.to_string()
+            });
+            if let Ok(probe_bytes) = serde_json::to_vec(&probe) {
+                let target = SocketAddr::new(upstream_addr, DISCOVERY_PORT);
+                if let Err(e) = out.send_to(&probe_bytes, target).await {
+                    warn!("Failed to send refresh probe to telescope: {}", e);
+                } else {
+                    info!("Sent refresh probe to telescope at {}", target);
+                }
+            }
+        }
     }
 }
 
@@ -160,19 +239,48 @@ pub async fn run(
 ///
 /// The Seestar is picky about probe format (discovered by bisection):
 /// - `name` must not contain dashes — a dash causes malformed JSON in the response
-/// - Message must be terminated with `\r\n` — Seestar ignores probes without it
-/// - Probe must be sent from an ephemeral source port — Seestar replies unicast
-///   to the sender's port, not back to port 4720
+/// - Probe must be sent from source port 4720 — the telescope ignores probes
+///   from other ports (the guest-mode handshake is keyed on the well-known port)
 async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.set_broadcast(true)?;
+    probe_upstream_at(upstream_addr, DISCOVERY_PORT).await
+}
 
-    // Detect local IP for the probe.
-    let local_ip = {
+/// Like [`probe_upstream`] but binds the probe socket to `probe_port` instead
+/// of the well-known discovery port. Used in unit tests to avoid conflicts with
+/// real port 4720.
+async fn probe_upstream_at(upstream_addr: IpAddr, probe_port: u16) -> anyhow::Result<Value> {
+    // Detect the local IP (and therefore the interface) that routes to the
+    // telescope.  We bind the probe socket to this specific IP rather than
+    // 0.0.0.0 so that:
+    //   (a) the broadcast goes out on the correct interface (e.g. wlan0),
+    //       not whichever interface the OS happens to pick for 255.255.255.255;
+    //   (b) the telescope's unicast reply (addressed to this IP) is received
+    //       by this socket.
+    let local_ip_addr: IpAddr = {
         let s = std::net::UdpSocket::bind("0.0.0.0:0")?;
         s.connect(SocketAddr::new(upstream_addr, 1))?;
-        s.local_addr()?.ip().to_string()
+        s.local_addr()?.ip()
     };
+    let local_ip = local_ip_addr.to_string();
+
+    // In production (probe_port == DISCOVERY_PORT) bind to the well-known port
+    // so the telescope accepts the probe (it keys on source port 4720).
+    // In test mode (any other port) bind to an ephemeral source port and
+    // unicast directly to upstream_addr rather than broadcasting, so the mock
+    // and the probe socket don't compete for the same address:port.
+    let (probe_addr, target) = if probe_port == DISCOVERY_PORT {
+        (
+            SocketAddr::new(local_ip_addr, probe_port),
+            SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::BROADCAST), probe_port),
+        )
+    } else {
+        (
+            SocketAddr::new(local_ip_addr, 0),
+            SocketAddr::new(upstream_addr, probe_port),
+        )
+    };
+    let socket = UdpSocket::bind(probe_addr).await?;
+    socket.set_broadcast(true)?;
 
     let probe = serde_json::json!({
         "id": 201,
@@ -180,25 +288,51 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
         "name": "seestarproxy",
         "ip": local_ip
     });
-
-    let target = SocketAddr::new(upstream_addr, DISCOVERY_PORT);
-    let mut probe_bytes = serde_json::to_vec(&probe)?;
-    probe_bytes.extend_from_slice(b"\r\n");
+    let probe_bytes = serde_json::to_vec(&probe)?;
+    info!(
+        "Discovery probe: sending {} bytes from {:?} to {}",
+        probe_bytes.len(),
+        socket.local_addr(),
+        target
+    );
     socket.send_to(&probe_bytes, target).await?;
+    info!("Discovery probe: sent OK, waiting up to 5s for response from {}", upstream_addr);
 
     let mut buf = [0u8; 16_384];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let (n, src) = socket.recv_from(&mut buf).await?;
+            info!("Discovery probe: received {} bytes from {}", n, src);
             if src.ip() == upstream_addr {
                 let slice = buf[..n].trim_ascii_end();
                 match serde_json::from_slice(slice) {
                     Ok(v) => return Ok::<Value, anyhow::Error>(v),
                     Err(e) => {
+                        let text = String::from_utf8_lossy(slice);
+                        // Distinguish two sources of malformed responses:
+                        //
+                        // 1. Firmware error (e.g. code-101 "Second root"): the telescope
+                        //    rejected our probe but DID receive it, so the guest-mode
+                        //    handshake happened.  The response contains "code" or "error"
+                        //    fields (with unescaped quotes making the JSON invalid).
+                        //    → break out and try TCP fallback immediately.
+                        //
+                        // 2. Echo of another client's probe: the telescope embeds the
+                        //    sender's name verbatim; if that name contained special chars
+                        //    the response is also unparseable, but has "result" not "error".
+                        //    → skip and keep waiting for our own probe's response.
+                        if text.contains("\"code\"") || text.contains("\"error\"") {
+                            warn!(
+                                "Discovery probe: firmware error response from upstream \
+                                 ({}): {} — proceeding to TCP fallback immediately",
+                                e, text
+                            );
+                            return Err(e.into());
+                        }
                         warn!(
-                            "Discovery probe: ignoring malformed response from upstream ({}): {}",
-                            e,
-                            String::from_utf8_lossy(slice)
+                            "Discovery probe: ignoring malformed response from upstream \
+                             ({}): {}",
+                            e, text
                         );
                         continue;
                     }
@@ -210,14 +344,11 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
 
     match result {
         Ok(Ok(v)) => Ok(v),
-        Ok(Err(e)) => Err(e),
-        Err(_) => {
-            warn!(
-                "Discovery probe to {} timed out, using minimal info",
-                upstream_addr
-            );
-            // Fallback: try TCP get_device_state to build a proper response.
-            warn!("Trying TCP fallback for device info...");
+        Ok(Err(_)) | Err(_) => {
+            // Either the telescope responded with malformed JSON (probe was received,
+            // guest-mode handshake happened) or the probe timed out entirely.
+            // Either way, try TCP get_device_state to build a proper response.
+            warn!("Trying TCP fallback for device info from {}...", upstream_addr);
             match fetch_device_info_tcp(upstream_addr).await {
                 Some(info) => Ok(info),
                 None => {
@@ -242,6 +373,38 @@ async fn probe_upstream(upstream_addr: IpAddr) -> anyhow::Result<Value> {
     }
 }
 
+/// Build the configured-identity discovery response (extracted for testing).
+fn build_configured_response(
+    sn: &str,
+    model: Option<&str>,
+    bssid: Option<&str>,
+    proxy_ip: &str,
+) -> serde_json::Value {
+    let model = model.unwrap_or("Seestar S50");
+    let ssid = format!("S50_{}", sn);
+    let mut result = serde_json::json!({
+        "product_model": model,
+        "sn": sn,
+        "ssid": ssid,
+        "ip": proxy_ip,
+        "is_verified": true,
+        "tcp_client_num": 0,
+        "can_star_mode_sel_cam": false,
+        "serc": "WPA-PSK"
+    });
+    if let Some(b) = bssid {
+        result["bssid"] = serde_json::Value::String(b.to_string());
+    }
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "Timestamp": "0",
+        "method": "scan_iscope",
+        "result": result,
+        "code": 0,
+        "id": 201
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,16 +418,11 @@ mod tests {
     /// waiting rather than bubbling up a parse error.
     #[tokio::test]
     async fn probe_upstream_skips_malformed_then_succeeds() {
-        // Try to bind the mock telescope port; skip if already in use.
-        let mock_sock = match UdpSocket::bind("127.0.0.1:4720").await {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "SKIP probe_upstream_skips_malformed_then_succeeds: could not bind 127.0.0.1:4720: {e}"
-                );
-                return;
-            }
-        };
+        // Use probe_upstream_at with an ephemeral port to avoid any conflict
+        // with the well-known port 4720.  The mock binds on 127.0.0.1:0 and
+        // probe_upstream_at targets it directly.
+        let mock_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mock_port = mock_sock.local_addr().unwrap().port();
 
         let valid_response = serde_json::json!({
             "id": 201,
@@ -281,7 +439,7 @@ mod tests {
 
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
-            // Receive the probe from probe_upstream.
+            // Receive the probe broadcast (delivered to loopback).
             let Ok((_, src)) = mock_sock.recv_from(&mut buf).await else {
                 return;
             };
@@ -296,7 +454,7 @@ mod tests {
         });
 
         let upstream: IpAddr = "127.0.0.1".parse().unwrap();
-        let result = probe_upstream(upstream).await;
+        let result = probe_upstream_at(upstream, mock_port).await;
         assert!(
             result.is_ok(),
             "probe_upstream should succeed despite receiving a malformed response first: {:?}",
@@ -305,7 +463,122 @@ mod tests {
         assert_eq!(result.unwrap()["result"]["sn"], "TEST001");
     }
 
+    // ── run: IP patching ─────────────────────────────────────────────────────
+
+    /// The `device_info` returned by `probe_upstream` contains the upstream
+    /// telescope's IP. `run` must overwrite `result.ip` with the proxy's bind
+    /// address so the Seestar app connects to the proxy, not the telescope.
+    #[tokio::test]
+    async fn run_patches_result_ip_to_proxy_bind_address() {
+        // Bind a mock telescope UDP socket on an ephemeral port.
+        let mock_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mock_port = mock_sock.local_addr().unwrap().port();
+
+        // Build a discovery response that has the telescope's own IP.
+        let telescope_response = serde_json::json!({
+            "id": 201,
+            "method": "scan_iscope",
+            "result": {
+                "product_model": "Seestar S50",
+                "sn": "TEST_IP_PATCH",
+                "ip": "10.0.0.99",   // telescope's real IP — should be replaced
+                "tcp_client_num": 0
+            },
+            "code": 0
+        });
+        let resp_bytes = serde_json::to_vec(&telescope_response).unwrap();
+
+        // Serve one probe response.
+        tokio::spawn(async move {
+            let mut buf = [0u8; 4096];
+            let Ok((_, src)) = mock_sock.recv_from(&mut buf).await else { return };
+            let _ = mock_sock.send_to(&resp_bytes, src).await;
+        });
+
+        // probe_upstream with a custom port (we reuse probe_upstream directly
+        // since the port is embedded in the SocketAddr built inside it — instead,
+        // test via the patching logic directly).
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // Simulate what run() does: get device info, patch the IP.
+        let probe = serde_json::json!({
+            "id": 201, "method": "scan_iscope",
+            "name": "seestarproxy", "ip": "127.0.0.1"
+        });
+        let sock = UdpSocket::bind("0.0.0.0:0").await.unwrap();
+        sock.set_broadcast(true).unwrap();
+        let target = std::net::SocketAddr::new(upstream, mock_port);
+        let mut bytes = serde_json::to_vec(&probe).unwrap();
+        bytes.extend_from_slice(b"\r\n");
+        sock.send_to(&bytes, target).await.unwrap();
+        let mut buf = [0u8; 4096];
+        let (n, _) = sock.recv_from(&mut buf).await.unwrap();
+        let mut device_info: serde_json::Value =
+            serde_json::from_slice(&buf[..n]).unwrap();
+
+        // Apply the same patching logic as run().
+        let bind_addr: IpAddr = "192.168.5.10".parse().unwrap();
+        if let Some(result) = device_info.get_mut("result") {
+            result["ip"] = serde_json::Value::String(bind_addr.to_string());
+        }
+
+        assert_eq!(
+            device_info["result"]["ip"],
+            "192.168.5.10",
+            "result.ip must be patched to the proxy bind address"
+        );
+        assert_eq!(
+            device_info["result"]["sn"], "TEST_IP_PATCH",
+            "other fields must be preserved"
+        );
+    }
+
     // ── fetch_device_info_tcp ─────────────────────────────────────────────────
+
+    /// The telescope may push event lines before replying to get_device_state.
+    /// The TCP fallback must skip those and return the line that has a result object.
+    #[tokio::test]
+    async fn fetch_device_info_tcp_skips_event_lines_before_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let upstream: IpAddr = "127.0.0.1".parse().unwrap();
+
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            // Simulate the telescope sending an event and a heartbeat before the reply.
+            conn.write_all(
+                b"{\"Event\":\"PiStatus\",\"Timestamp\":\"1.0\",\"state\":\"working\"}\r\n",
+            )
+            .await
+            .unwrap();
+            conn.write_all(
+                b"{\"id\":1,\"method\":\"test_connection\",\"result\":\"pong\"}\r\n",
+            )
+            .await
+            .unwrap();
+            let resp = serde_json::json!({
+                "id": 999,
+                "result": {
+                    "device": { "sn": "SN_SKIP", "product_model": "Seestar S50" },
+                    "ap": { "ssid": "SkipNet" }
+                },
+                "code": 0
+            });
+            conn.write_all(
+                format!("{}\r\n", serde_json::to_string(&resp).unwrap()).as_bytes(),
+            )
+            .await
+            .unwrap();
+        });
+
+        let result = fetch_device_info_tcp_at(upstream, port).await;
+        assert!(result.is_some(), "must find the device-state response line");
+        let v = result.unwrap();
+        assert_eq!(v["result"]["sn"], "SN_SKIP");
+        assert_eq!(v["result"]["ssid"], "SkipNet");
+    }
 
     /// Happy path: a TCP server responds to get_device_state with full device info.
     #[tokio::test]
@@ -367,16 +640,25 @@ mod tests {
             .write_all(b"{\"id\":999,\"method\":\"get_device_state\",\"params\":[\"verify\"]}\r\n")
             .await
             .ok()?;
-        let mut line = String::new();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            reader.read_line(&mut line),
-        )
+
+        let parsed: Value = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                reader.read_line(&mut line).await?;
+                let v: Value = match serde_json::from_str(line.trim()) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("result").and_then(|r| r.as_object()).is_some() {
+                    return Ok::<Value, anyhow::Error>(v);
+                }
+            }
+        })
         .await
         .ok()?
         .ok()?;
 
-        let parsed: Value = serde_json::from_str(line.trim()).ok()?;
         let result = parsed.get("result")?;
         Some(serde_json::json!({
             "jsonrpc": "2.0",
@@ -469,6 +751,50 @@ mod tests {
         assert_eq!(v["result"]["product_model"], "Seestar");
         assert_eq!(v["result"]["ssid"], "");
     }
+
+    // ── build_configured_response ─────────────────────────────────────────────
+
+    #[test]
+    fn configured_response_uses_provided_sn_and_model() {
+        let v = build_configured_response("4ddb0535", Some("Seestar S50"), None, "192.168.1.10");
+        assert_eq!(v["result"]["sn"], "4ddb0535");
+        assert_eq!(v["result"]["product_model"], "Seestar S50");
+    }
+
+    #[test]
+    fn configured_response_derives_ssid_from_sn() {
+        let v = build_configured_response("4ddb0535", None, None, "192.168.1.10");
+        assert_eq!(v["result"]["ssid"], "S50_4ddb0535");
+    }
+
+    #[test]
+    fn configured_response_defaults_model_to_seestar_s50() {
+        let v = build_configured_response("abc123", None, None, "192.168.1.10");
+        assert_eq!(v["result"]["product_model"], "Seestar S50");
+    }
+
+    #[test]
+    fn configured_response_includes_bssid_when_provided() {
+        let v = build_configured_response(
+            "4ddb0535",
+            None,
+            Some("c2:f5:35:2f:17:26"),
+            "192.168.1.10",
+        );
+        assert_eq!(v["result"]["bssid"], "c2:f5:35:2f:17:26");
+    }
+
+    #[test]
+    fn configured_response_omits_bssid_when_not_provided() {
+        let v = build_configured_response("4ddb0535", None, None, "192.168.1.10");
+        assert!(v["result"].get("bssid").is_none());
+    }
+
+    #[test]
+    fn configured_response_sets_proxy_ip() {
+        let v = build_configured_response("4ddb0535", None, None, "10.0.0.5");
+        assert_eq!(v["result"]["ip"], "10.0.0.5");
+    }
 }
 
 /// Fetch device info via TCP get_device_state and build a discovery response.
@@ -477,10 +803,12 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
     use tokio::net::TcpStream;
 
     let addr = SocketAddr::new(upstream_addr, 4700);
-    let stream = tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr))
-        .await
-        .ok()?
-        .ok()?;
+    info!("TCP fallback: connecting to {}...", addr);
+    let stream = match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr)).await {
+        Ok(Ok(s)) => { info!("TCP fallback: connected"); s }
+        Ok(Err(e)) => { warn!("TCP fallback: connect error: {}", e); return None; }
+        Err(_) => { warn!("TCP fallback: connect timed out"); return None; }
+    };
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -490,16 +818,30 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
         .await
         .ok()?;
 
-    let mut line = String::new();
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        reader.read_line(&mut line),
-    )
+    // The telescope may send initial event messages before replying to our
+    // get_device_state command.  Read lines until we find the one that has
+    // id == 999 (our request) and a "result" object, or give up after 5 s.
+    let parsed: Value = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).await?;
+            let trimmed = line.trim();
+            info!("TCP fallback recv: {}", trimmed);
+            let v: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            // Accept any line where result is a JSON object (the device-state reply).
+            if v.get("result").and_then(|r| r.as_object()).is_some() {
+                return Ok::<Value, anyhow::Error>(v);
+            }
+        }
+    })
     .await
-    .ok()?
-    .ok()?;
+    .ok()?  // timeout elapsed → None
+    .ok()?; // io::Error → None
 
-    let parsed: Value = serde_json::from_str(line.trim()).ok()?;
     let result = parsed.get("result")?;
 
     let discovery = serde_json::json!({

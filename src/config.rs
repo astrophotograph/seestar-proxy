@@ -34,6 +34,9 @@ pub struct FileConfig {
     pub wg_key_file: Option<PathBuf>,
     pub wg_endpoint: Option<String>,
     pub verbose: Option<u8>,
+    pub telescope_sn: Option<String>,
+    pub telescope_model: Option<String>,
+    pub telescope_bssid: Option<String>,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -167,6 +170,21 @@ pub struct Config {
     /// Verbose logging
     #[arg(long, short, action = clap::ArgAction::Count)]
     pub verbose: u8,
+
+    /// Telescope serial number for discovery responses (skips UDP probe).
+    /// Find it in the ZWO Seestar app under device info, e.g. "SS50A1234567".
+    #[arg(long, env = "SEESTAR_TELESCOPE_SN")]
+    pub telescope_sn: Option<String>,
+
+    /// Telescope product model for discovery responses (default: "Seestar S50").
+    /// Used together with --telescope-sn to skip the UDP discovery probe.
+    #[arg(long, env = "SEESTAR_TELESCOPE_MODEL")]
+    pub telescope_model: Option<String>,
+
+    /// Telescope WiFi BSSID for discovery responses (e.g. "c2:f5:35:2f:17:26").
+    /// Required for the iOS app to connect via home network rather than AP-switch.
+    #[arg(long, env = "SEESTAR_TELESCOPE_BSSID")]
+    pub telescope_bssid: Option<String>,
 }
 
 impl Config {
@@ -216,6 +234,15 @@ impl Config {
         }
         if self.record.is_none() {
             self.record = file.record;
+        }
+        if self.telescope_sn.is_none() {
+            self.telescope_sn = file.telescope_sn;
+        }
+        if self.telescope_model.is_none() {
+            self.telescope_model = file.telescope_model;
+        }
+        if self.telescope_bssid.is_none() {
+            self.telescope_bssid = file.telescope_bssid;
         }
 
         // For fields with defaults, we can't perfectly distinguish "user passed
@@ -404,6 +431,68 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(cfg.record, Some(PathBuf::from("/tmp/sessions")));
+    }
+
+    #[test]
+    fn apply_file_fills_none_telescope_sn() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            telescope_sn: Some("4ddb0535".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.telescope_sn.as_deref(), Some("4ddb0535"));
+    }
+
+    #[test]
+    fn apply_file_does_not_overwrite_set_telescope_sn() {
+        let mut cfg = Config::parse_from(["seestar-proxy", "--telescope-sn", "cli-sn"]);
+        cfg.apply_file(FileConfig {
+            telescope_sn: Some("file-sn".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.telescope_sn.as_deref(), Some("cli-sn"));
+    }
+
+    #[test]
+    fn apply_file_fills_none_telescope_model() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            telescope_model: Some("Seestar S30".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.telescope_model.as_deref(), Some("Seestar S30"));
+    }
+
+    #[test]
+    fn apply_file_does_not_overwrite_set_telescope_model() {
+        let mut cfg =
+            Config::parse_from(["seestar-proxy", "--telescope-model", "cli-model"]);
+        cfg.apply_file(FileConfig {
+            telescope_model: Some("file-model".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.telescope_model.as_deref(), Some("cli-model"));
+    }
+
+    #[test]
+    fn apply_file_fills_none_telescope_bssid() {
+        let mut cfg = default_config();
+        cfg.apply_file(FileConfig {
+            telescope_bssid: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.telescope_bssid.as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+    }
+
+    #[test]
+    fn apply_file_does_not_overwrite_set_telescope_bssid() {
+        let mut cfg =
+            Config::parse_from(["seestar-proxy", "--telescope-bssid", "11:22:33:44:55:66"]);
+        cfg.apply_file(FileConfig {
+            telescope_bssid: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(cfg.telescope_bssid.as_deref(), Some("11:22:33:44:55:66"));
     }
 
     // ── apply_file: default-value ports ──────────────────────────────────────

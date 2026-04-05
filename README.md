@@ -45,6 +45,8 @@ The web dashboard is at `http://localhost:4090/`.
 
 ## First-Time App Setup
 
+### Hotspot / same-network setup (non-iOS, or iOS via AP)
+
 The Seestar app remembers the IP address it first connects to and reuses it in future sessions. To redirect the app through the proxy, it must connect to the proxy's IP **before** it ever connects directly to the scope. Follow this order:
 
 1. **Turn the scope OFF** — if the scope is reachable, the app may connect directly and skip the proxy.
@@ -53,6 +55,27 @@ The Seestar app remembers the IP address it first connects to and reuses it in f
 4. **Turn the scope ON** — the proxy detects it coming online and establishes the upstream connection automatically.
 
 Once the app has connected through the proxy at least once, it remembers the proxy's IP and reconnects automatically on subsequent launches — no special startup order needed after that.
+
+### iOS app on a home network (proxy on Raspberry Pi)
+
+The iOS Seestar app has two connection modes:
+
+- **Direct AP mode** — connects via Bluetooth, then switches your phone's WiFi to the telescope's own hotspot (`S50_XXXXXXXX`). This is the default first-time pairing flow.
+- **Home network mode** — once a telescope is paired, the app can connect over your home WiFi via TCP without switching networks.
+
+The proxy enables home network mode. **First-time pairing requires the direct AP flow** — do this once with the telescope directly (without the proxy). After that, start the proxy and the app will connect over the home network:
+
+```bash
+./seestar-proxy --upstream 192.168.1.123 --discovery
+```
+
+For faster startup, provide the telescope's serial number to skip the discovery probe (avoids a ~10 second delay at launch):
+
+```bash
+./seestar-proxy --upstream 192.168.1.123 --discovery --telescope-sn 4ddb0535
+```
+
+The serial number is the hex suffix of the telescope's WiFi AP name — if the AP is `S50_4ddb0535`, the serial number is `4ddb0535`.
 
 ### Troubleshooting
 
@@ -109,6 +132,9 @@ seestar-proxy [OPTIONS]
 | `--wg-subnet <CIDR>` | 10.99.0.0/24 | WireGuard tunnel subnet |
 | `--wg-key-file <PATH>` | ~/.seestar-proxy/wg.key | WireGuard key file |
 | `--wg-endpoint <HOST:PORT>` | auto-detect | External endpoint for client config |
+| `--telescope-sn <SN>` | — | Telescope serial number for discovery (required for iOS on home network) |
+| `--telescope-model <MODEL>` | Seestar S50 | Telescope model name for discovery responses |
+| `--telescope-bssid <MAC>` | — | Telescope AP BSSID for discovery responses |
 | `-v, --verbose` | info | Increase log verbosity (repeat for debug/trace) |
 
 ## WireGuard Remote Access
