@@ -270,11 +270,10 @@ async fn discovery_configured_identity_skips_probe_and_serves_correct_response()
         .unwrap();
 
     let mut buf = [0u8; 4096];
-    let (n, src) =
-        tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
-            .await
-            .expect("timed out waiting for configured-identity discovery response")
-            .unwrap();
+    let (n, src) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+        .await
+        .expect("timed out waiting for configured-identity discovery response")
+        .unwrap();
 
     let response: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
 

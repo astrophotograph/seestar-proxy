@@ -313,8 +313,15 @@ async fn main() -> anyhow::Result<()> {
         let telescope_bssid = config.telescope_bssid.clone();
         if let Some(upstream_ip) = upstream_control.map(|s| s.ip()) {
             Some(tokio::spawn(async move {
-                if let Err(e) =
-                    discovery::run(bind, upstream_ip, port, telescope_sn, telescope_model, telescope_bssid).await
+                if let Err(e) = discovery::run(
+                    bind,
+                    upstream_ip,
+                    port,
+                    telescope_sn,
+                    telescope_model,
+                    telescope_bssid,
+                )
+                .await
                 {
                     error!("Discovery bridge error: {}", e);
                 }
@@ -455,4 +462,3 @@ async fn raw_pipe(bind: SocketAddr, upstream: SocketAddr, label: &'static str) {
         info!("[{}] Session ended for {}", label, client_addr);
     }
 }
-
