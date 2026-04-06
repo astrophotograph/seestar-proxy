@@ -32,6 +32,10 @@ libc = "0.2"
 # NTP time sync (for headless Pi without RTC)
 rsntp = { version = "4", optional = true, default-features = false }
 
+# Bluetooth LE (feature-gated; used by the ble-scan exploration binary)
+btleplug = { version = "0.11", optional = true }
+uuid = { version = "1", optional = true }
+
 # Embedded Tailscale node (feature-gated)
 # Using fork until upstream merges ARM c_char fix:
 # https://github.com/messense/libtailscale-rs
@@ -44,6 +48,17 @@ lua54 = ["mlua/lua54"]
 wireguard = ["dep:boringtun", "dep:smoltcp", "dep:qrcode", "dep:x25519-dalek", "dep:rand_core"]
 tailscale = ["dep:libtailscale"]
 ntp = ["dep:rsntp"]
+bluetooth = ["dep:btleplug", "dep:uuid"]
+
+[[bin]]
+name = "ble_scan"
+path = "src/bin/ble_scan.rs"
+required-features = ["bluetooth"]
+
+[[bin]]
+name = "ble_pair"
+path = "src/bin/ble_pair.rs"
+required-features = ["bluetooth"]
 
 [dev-dependencies]
 tower = "0.5"
