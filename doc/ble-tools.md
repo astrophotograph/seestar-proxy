@@ -62,6 +62,7 @@ cargo run --bin ble_pair --features bluetooth -- \
 |------|---------|-------------|
 | `--name <PREFIX>` | `S50_` | Device name prefix to match |
 | `--sn <TOKEN>` | (see below) | BLE session token |
+| `--key <PATH>` | `/etc/my-key.pem` | RSA private key for auth challenge signing |
 | `--ssid <SSID>` | — | Home WiFi SSID to configure |
 | `--password <PWD>` | — | Home WiFi password to configure |
 | `--scan-secs <N>` | `15` | BLE scan timeout |
