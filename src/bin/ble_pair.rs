@@ -33,8 +33,8 @@ struct Args {
     sn: String,
 
     /// RSA private key (PEM) used to sign the auth challenge
-    #[arg(long, default_value = "/etc/seestar/client.pem")]
-    key: String,
+    #[arg(long)]
+    key: Option<String>,
 
     /// Home WiFi SSID to configure
     #[arg(long)]
@@ -243,7 +243,8 @@ async fn main() -> anyhow::Result<()> {
     if challenge != "__already_trusted__" {
         println!("Challenge: {:?}", challenge);
 
-        let signature = sign_challenge(&args.key, &challenge)?;
+        let key = args.key.as_deref().ok_or_else(|| anyhow::anyhow!("--key is required when the telescope issues a challenge"))?;
+        let signature = sign_challenge(key, &challenge)?;
         println!("Signature: {}...{}", &signature[..8], &signature[signature.len() - 8..]);
 
         let resp = send_and_recv(
