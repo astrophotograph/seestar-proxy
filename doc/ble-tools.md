@@ -62,7 +62,6 @@ cargo run --bin ble_pair --features bluetooth -- \
 |------|---------|-------------|
 | `--name <PREFIX>` | `S50_` | Device name prefix to match |
 | `--sn <TOKEN>` | (see below) | BLE session token |
-| `--key <PATH>` | `/etc/seestar/client.pem` | RSA private key for auth challenge signing |
 | `--ssid <SSID>` | — | Home WiFi SSID to configure |
 | `--password <PWD>` | — | Home WiFi password to configure |
 | `--scan-secs <N>` | `15` | BLE scan timeout |
@@ -85,9 +84,6 @@ Commands are JSON objects written to the characteristic. Responses arrive as NOT
 The fields `ble_method` and `ble_sn` are used instead of the TCP protocol's `method` and `sn`.
 
 ### Authentication
-
-Authentication mirrors the TCP RSA challenge-response flow from `authenticate-rpi.lua`. The
-private key at `/etc/seestar/client.pem` on the ASIAIR Pi is the same key pair used for TCP auth.
 
 The session token (`--sn`) is a timestamp string (e.g. `20240529115404`) that the telescope stores
 in `/home/pi/.ZWO/ble.conf`. Once a token is trusted (marked `Y` in that file), subsequent
