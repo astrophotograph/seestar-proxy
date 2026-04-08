@@ -64,11 +64,7 @@ async fn main() -> anyhow::Result<()> {
                 let Ok(Some(props)) = p.properties().await else {
                     continue;
                 };
-                let device_name = props
-                    .local_name
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase();
+                let device_name = props.local_name.as_deref().unwrap_or("").to_lowercase();
                 if device_name.contains(&name_lower) {
                     println!(
                         "\nFound: {} ({:?})",
@@ -90,7 +86,12 @@ async fn main() -> anyhow::Result<()> {
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("Scan timed out after {}s — is the telescope on?", args.scan_secs))??;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "Scan timed out after {}s — is the telescope on?",
+            args.scan_secs
+        )
+    })??;
 
     adapter.stop_scan().await?;
 
@@ -139,11 +140,23 @@ async fn main() -> anyhow::Result<()> {
 
 fn format_flags(flags: &CharPropFlags) -> String {
     let mut parts = Vec::new();
-    if flags.contains(CharPropFlags::READ) { parts.push("READ"); }
-    if flags.contains(CharPropFlags::WRITE) { parts.push("WRITE"); }
-    if flags.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) { parts.push("WRITE_NO_RSP"); }
-    if flags.contains(CharPropFlags::NOTIFY) { parts.push("NOTIFY"); }
-    if flags.contains(CharPropFlags::INDICATE) { parts.push("INDICATE"); }
-    if flags.contains(CharPropFlags::BROADCAST) { parts.push("BROADCAST"); }
+    if flags.contains(CharPropFlags::READ) {
+        parts.push("READ");
+    }
+    if flags.contains(CharPropFlags::WRITE) {
+        parts.push("WRITE");
+    }
+    if flags.contains(CharPropFlags::WRITE_WITHOUT_RESPONSE) {
+        parts.push("WRITE_NO_RSP");
+    }
+    if flags.contains(CharPropFlags::NOTIFY) {
+        parts.push("NOTIFY");
+    }
+    if flags.contains(CharPropFlags::INDICATE) {
+        parts.push("INDICATE");
+    }
+    if flags.contains(CharPropFlags::BROADCAST) {
+        parts.push("BROADCAST");
+    }
     parts.join(" | ")
 }

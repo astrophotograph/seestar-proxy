@@ -465,8 +465,7 @@ mod tests {
 
     #[test]
     fn apply_file_does_not_overwrite_set_telescope_model() {
-        let mut cfg =
-            Config::parse_from(["seestar-proxy", "--telescope-model", "cli-model"]);
+        let mut cfg = Config::parse_from(["seestar-proxy", "--telescope-model", "cli-model"]);
         cfg.apply_file(FileConfig {
             telescope_model: Some("file-model".to_string()),
             ..Default::default()

@@ -71,9 +71,15 @@ fn sign_challenge(key_path: &str, challenge: &str) -> anyhow::Result<String> {
     std::fs::File::create(&data_path)?.write_all(challenge.as_bytes())?;
 
     let status = Command::new("openssl")
-        .args(["dgst", "-sha1", "-sign", key_path,
-               "-out", sig_path.to_str().unwrap(),
-               data_path.to_str().unwrap()])
+        .args([
+            "dgst",
+            "-sha1",
+            "-sign",
+            key_path,
+            "-out",
+            sig_path.to_str().unwrap(),
+            data_path.to_str().unwrap(),
+        ])
         .status()?;
     anyhow::ensure!(status.success(), "openssl signing failed");
 
@@ -140,8 +146,12 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("Event stream ended");
             };
             if let CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) = event {
-                let Ok(p) = adapter.peripheral(&id).await else { continue };
-                let Ok(Some(props)) = p.properties().await else { continue };
+                let Ok(p) = adapter.peripheral(&id).await else {
+                    continue;
+                };
+                let Ok(Some(props)) = p.properties().await else {
+                    continue;
+                };
                 let name = props.local_name.as_deref().unwrap_or("").to_lowercase();
                 if name.contains(&name_lower) {
                     println!("Found: {}", props.local_name.as_deref().unwrap_or("?"));
@@ -178,8 +188,7 @@ async fn main() -> anyhow::Result<()> {
     // The telescope switches to AP mode then sends a verification challenge
     // (send_air_verify_start) which may take several seconds to arrive.
     // Wait for the configured duration before falling back to get_verify_str.
-    let spontaneous =
-        timeout(Duration::from_secs(args.challenge_wait_secs), notifs.next()).await;
+    let spontaneous = timeout(Duration::from_secs(args.challenge_wait_secs), notifs.next()).await;
 
     let challenge: String = match spontaneous {
         Ok(Some(notif)) => {
@@ -226,7 +235,8 @@ async fn main() -> anyhow::Result<()> {
         // An empty ack (no result field, no error) means the SN is already
         // trusted — no re-challenge needed.  Return a sentinel so callers
         // know to skip the sign+verify steps.
-        if let Some(ch) = resp.pointer("/result/str")
+        if let Some(ch) = resp
+            .pointer("/result/str")
             .or_else(|| resp.get("result").filter(|v| v.is_string()))
             .and_then(|v| v.as_str())
         {
@@ -243,9 +253,15 @@ async fn main() -> anyhow::Result<()> {
     if challenge != "__already_trusted__" {
         println!("Challenge: {:?}", challenge);
 
-        let key = args.key.as_deref().ok_or_else(|| anyhow::anyhow!("--key is required when the telescope issues a challenge"))?;
+        let key = args.key.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("--key is required when the telescope issues a challenge")
+        })?;
         let signature = sign_challenge(key, &challenge)?;
-        println!("Signature: {}...{}", &signature[..8], &signature[signature.len() - 8..]);
+        println!(
+            "Signature: {}...{}",
+            &signature[..8],
+            &signature[signature.len() - 8..]
+        );
 
         let resp = send_and_recv(
             &peripheral,

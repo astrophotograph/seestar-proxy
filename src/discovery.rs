@@ -170,7 +170,10 @@ pub async fn run(
                 }
                 info!(
                     "Updated device cache from telescope response: sn={}",
-                    updated.pointer("/result/sn").and_then(|v| v.as_str()).unwrap_or("?")
+                    updated
+                        .pointer("/result/sn")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?")
                 );
                 device_info = updated;
                 have_real_info = true;
@@ -296,7 +299,10 @@ async fn probe_upstream_at(upstream_addr: IpAddr, probe_port: u16) -> anyhow::Re
         target
     );
     socket.send_to(&probe_bytes, target).await?;
-    info!("Discovery probe: sent OK, waiting up to 5s for response from {}", upstream_addr);
+    info!(
+        "Discovery probe: sent OK, waiting up to 5s for response from {}",
+        upstream_addr
+    );
 
     let mut buf = [0u8; 16_384];
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -348,7 +354,10 @@ async fn probe_upstream_at(upstream_addr: IpAddr, probe_port: u16) -> anyhow::Re
             // Either the telescope responded with malformed JSON (probe was received,
             // guest-mode handshake happened) or the probe timed out entirely.
             // Either way, try TCP get_device_state to build a proper response.
-            warn!("Trying TCP fallback for device info from {}...", upstream_addr);
+            warn!(
+                "Trying TCP fallback for device info from {}...",
+                upstream_addr
+            );
             match fetch_device_info_tcp(upstream_addr).await {
                 Some(info) => Ok(info),
                 None => {
@@ -491,7 +500,9 @@ mod tests {
         // Serve one probe response.
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
-            let Ok((_, src)) = mock_sock.recv_from(&mut buf).await else { return };
+            let Ok((_, src)) = mock_sock.recv_from(&mut buf).await else {
+                return;
+            };
             let _ = mock_sock.send_to(&resp_bytes, src).await;
         });
 
@@ -513,8 +524,7 @@ mod tests {
         sock.send_to(&bytes, target).await.unwrap();
         let mut buf = [0u8; 4096];
         let (n, _) = sock.recv_from(&mut buf).await.unwrap();
-        let mut device_info: serde_json::Value =
-            serde_json::from_slice(&buf[..n]).unwrap();
+        let mut device_info: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
 
         // Apply the same patching logic as run().
         let bind_addr: IpAddr = "192.168.5.10".parse().unwrap();
@@ -523,8 +533,7 @@ mod tests {
         }
 
         assert_eq!(
-            device_info["result"]["ip"],
-            "192.168.5.10",
+            device_info["result"]["ip"], "192.168.5.10",
             "result.ip must be patched to the proxy bind address"
         );
         assert_eq!(
@@ -553,11 +562,9 @@ mod tests {
             )
             .await
             .unwrap();
-            conn.write_all(
-                b"{\"id\":1,\"method\":\"test_connection\",\"result\":\"pong\"}\r\n",
-            )
-            .await
-            .unwrap();
+            conn.write_all(b"{\"id\":1,\"method\":\"test_connection\",\"result\":\"pong\"}\r\n")
+                .await
+                .unwrap();
             let resp = serde_json::json!({
                 "id": 999,
                 "result": {
@@ -566,11 +573,9 @@ mod tests {
                 },
                 "code": 0
             });
-            conn.write_all(
-                format!("{}\r\n", serde_json::to_string(&resp).unwrap()).as_bytes(),
-            )
-            .await
-            .unwrap();
+            conn.write_all(format!("{}\r\n", serde_json::to_string(&resp).unwrap()).as_bytes())
+                .await
+                .unwrap();
         });
 
         let result = fetch_device_info_tcp_at(upstream, port).await;
@@ -775,12 +780,8 @@ mod tests {
 
     #[test]
     fn configured_response_includes_bssid_when_provided() {
-        let v = build_configured_response(
-            "4ddb0535",
-            None,
-            Some("c2:f5:35:2f:17:26"),
-            "192.168.1.10",
-        );
+        let v =
+            build_configured_response("4ddb0535", None, Some("c2:f5:35:2f:17:26"), "192.168.1.10");
         assert_eq!(v["result"]["bssid"], "c2:f5:35:2f:17:26");
     }
 
@@ -804,11 +805,23 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
 
     let addr = SocketAddr::new(upstream_addr, 4700);
     info!("TCP fallback: connecting to {}...", addr);
-    let stream = match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr)).await {
-        Ok(Ok(s)) => { info!("TCP fallback: connected"); s }
-        Ok(Err(e)) => { warn!("TCP fallback: connect error: {}", e); return None; }
-        Err(_) => { warn!("TCP fallback: connect timed out"); return None; }
-    };
+    let stream =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(s)) => {
+                info!("TCP fallback: connected");
+                s
+            }
+            Ok(Err(e)) => {
+                warn!("TCP fallback: connect error: {}", e);
+                return None;
+            }
+            Err(_) => {
+                warn!("TCP fallback: connect timed out");
+                return None;
+            }
+        };
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -839,7 +852,7 @@ async fn fetch_device_info_tcp(upstream_addr: IpAddr) -> Option<Value> {
         }
     })
     .await
-    .ok()?  // timeout elapsed → None
+    .ok()? // timeout elapsed → None
     .ok()?; // io::Error → None
 
     let result = parsed.get("result")?;
