@@ -220,9 +220,92 @@ jobs:
             seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}
             *.deb
 
+  build-ble:
+    name: Build BLE Tools (${{ matrix.target }})
+    needs: determine-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use_cross: true
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-latest
+            use_cross: true
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update version in Cargo.toml
+        run: |
+          VERSION="${{ needs.determine-version.outputs.version }}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          echo "Updated Cargo.toml to version $VERSION"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install dbus dev libraries (native)
+        if: "!matrix.use_cross"
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install mold linker (native)
+        if: "!matrix.use_cross"
+        run: sudo apt-get install -y mold
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        if: "!matrix.use_cross"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-ble
+
+      - name: Install cross
+        if: matrix.use_cross
+        run: |
+          curl -fsSL https://github.com/cross-rs/cross/releases/latest/download/cross-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C /usr/local/bin
+
+      - name: Build BLE tools (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }} --no-default-features --features bluetooth --bin ble_scan --bin ble_pair
+        env:
+          CROSS_CONFIG: Cross-ble.toml
+
+      - name: Build BLE tools (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features bluetooth --bin ble_scan --bin ble_pair
+        env:
+          RUSTC_WRAPPER: sccache
+          RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+
+      - name: Rename binaries
+        shell: bash
+        run: |
+          for bin in ble_scan ble_pair; do
+            SRC="target/${{ matrix.target }}/release/$bin"
+            DEST="${bin}-${{ matrix.target }}"
+            cp "$SRC" "$DEST"
+            echo "Binary: $DEST ($(du -h "$DEST" | cut -f1))"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ble-tools-${{ matrix.target }}
+          path: |
+            ble_scan-${{ matrix.target }}
+            ble_pair-${{ matrix.target }}
+
   publish-release:
     name: Publish Release
-    needs: [determine-version, build]
+    needs: [determine-version, build, build-ble]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -235,10 +318,10 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir release
-          for dir in artifacts/seestar-proxy*/; do
+          for dir in artifacts/*/; do
             cp "$dir"/* release/
           done
-          chmod +x release/seestar-proxy*
+          chmod +x release/seestar-proxy* release/ble_scan-* release/ble_pair-*
           ls -lh release/
 
       - name: Create release

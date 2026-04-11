@@ -1,0 +1,14 @@
+# Cross-compilation configuration for BLE tool builds.
+# Installs libdbus-1-dev (target arch) needed by btleplug / bluez-async.
+
+[target.armv7-unknown-linux-gnueabihf]
+pre-build = [
+    "dpkg --add-architecture armhf || true",
+    "apt-get update && apt-get install -y libdbus-1-dev:armhf pkg-config",
+]
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "dpkg --add-architecture arm64 || true",
+    "apt-get update && apt-get install -y libdbus-1-dev:arm64 pkg-config",
+]
