@@ -18,21 +18,20 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 0
 fi
 
-mapfile -t files < <(git diff --cached --name-only --diff-filter=ACM | grep -E '\.rs$' || true)
-if [[ ${#files[@]} -eq 0 ]]; then
-  exit 0
-fi
+echo "pre-commit: running cargo fmt..."
+cargo fmt
 
-echo "pre-commit: running cargo fmt on staged Rust files..."
-cargo fmt -- "${files[@]}"
+# Re-stage any .rs files that cargo fmt changed (staged or unstaged).
+mapfile -t changed < <(git diff --name-only -- '*.rs' || true)
+if [[ ${#changed[@]} -gt 0 ]]; then
+  git add -- "${changed[@]}"
+fi
 
 echo "pre-commit: running cargo clippy..."
 cargo clippy -- -D warnings || {
   echo "pre-commit: clippy found issues; please fix them before committing."
   exit 1
 }
-
-git add -- "${files[@]}"
 HOOK
 
 chmod +x "${hook_path}"
