@@ -274,13 +274,13 @@ jobs:
 
       - name: Build BLE tools (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }} --no-default-features --features bluetooth --bin ble_scan --bin ble_pair
+        run: cross build --release --target ${{ matrix.target }} --no-default-features --features bluetooth,lua54 --bin ble_scan --bin ble_pair
         env:
           CROSS_CONFIG: Cross-ble.toml
 
       - name: Build BLE tools (native)
         if: "!matrix.use_cross"
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features bluetooth --bin ble_scan --bin ble_pair
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features bluetooth,lua54 --bin ble_scan --bin ble_pair
         env:
           RUSTC_WRAPPER: sccache
           RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
