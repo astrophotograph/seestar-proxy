@@ -24,6 +24,7 @@ pub struct FileConfig {
     pub imaging_port: Option<u16>,
     pub discovery: Option<bool>,
     pub record: Option<PathBuf>,
+    pub replay: Option<PathBuf>,
     pub raw: Option<bool>,
     pub transparent: Option<bool>,
     pub dashboard_port: Option<u16>,
@@ -84,6 +85,10 @@ pub struct Config {
     /// Record traffic to a session directory (for mock telescope testing)
     #[arg(long, short, env = "SEESTAR_RECORD")]
     pub record: Option<PathBuf>,
+
+    /// Replay a recorded session directory (no telescope required)
+    #[arg(long, env = "SEESTAR_REPLAY")]
+    pub replay: Option<PathBuf>,
 
     /// Raw pipe mode — forward bytes transparently without JSON parsing or
     /// ID remapping. Useful for diagnostics (single client only).
@@ -234,6 +239,9 @@ impl Config {
         }
         if self.record.is_none() {
             self.record = file.record;
+        }
+        if self.replay.is_none() {
+            self.replay = file.replay;
         }
         if self.telescope_sn.is_none() {
             self.telescope_sn = file.telescope_sn;

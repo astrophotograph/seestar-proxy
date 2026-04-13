@@ -11,6 +11,7 @@ use crate::hooks::{HookAction, HookEngine};
 use crate::metrics::Metrics;
 use crate::protocol;
 use crate::recorder::Recorder;
+use crate::replay::ReplaySession;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +52,7 @@ pub async fn run(
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
     hooks: Option<Arc<HookEngine>>,
+    replay: Option<Arc<ReplaySession>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Control proxy listening on {}", bind_addr);
@@ -83,8 +85,32 @@ pub async fn run(
         h.set_upstream_tx(upstream_tx.clone());
     }
 
-    // Spawn the upstream connection task (waits for first client).
-    {
+    if let Some(session) = replay {
+        // ─── Replay mode ────────────────────────────────────────────────
+        // Drain client requests (keeps upstream_tx alive so handle_client
+        // doesn't see a closed channel and disconnect).
+        tokio::spawn(async move {
+            let mut rx = upstream_rx;
+            while let Some(msg) = rx.recv().await {
+                debug!("Replay drain: {}", &msg[..msg.len().min(120)]);
+            }
+        });
+
+        // Play back recorded telescope messages into event_tx.
+        let event_tx_r = event_tx.clone();
+        let handshake_done_r = handshake_done.clone();
+        let metrics_r = metrics.clone();
+        tokio::spawn(async move {
+            crate::replay::replay_control(
+                &session,
+                &event_tx_r,
+                &handshake_done_r,
+                metrics_r.as_deref(),
+            )
+            .await;
+        });
+    } else {
+        // ─── Normal upstream connection ──────────────────────────────────
         let upstream_started = upstream_started.clone();
         let state = state.clone();
         let event_tx = event_tx.clone();

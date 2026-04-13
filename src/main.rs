@@ -1,5 +1,6 @@
 use seestar_proxy::config::Config;
 use seestar_proxy::recorder::Recorder;
+use seestar_proxy::replay::ReplaySession;
 use seestar_proxy::{control, dashboard, discovery, hooks, imaging, metrics, protocol};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -35,8 +36,25 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Validate mutually exclusive options.
+    if config.replay.is_some() && config.record.is_some() {
+        return Err(anyhow::anyhow!(
+            "--replay and --record cannot be used together"
+        ));
+    }
+
+    // Load replay session if requested.
+    let replay_session = if let Some(ref dir) = config.replay {
+        Some(Arc::new(ReplaySession::load(dir)?))
+    } else {
+        None
+    };
+
     // Resolve upstream address — either from config or dynamically via SO_ORIGINAL_DST.
-    let (upstream_control, upstream_imaging) = if config.transparent && config.upstream.is_none() {
+    // In replay mode no upstream is needed.
+    let (upstream_control, upstream_imaging) = if replay_session.is_some() {
+        (None, None)
+    } else if config.transparent && config.upstream.is_none() {
         // Transparent mode without --upstream: address resolved at runtime from
         // the first redirected client connection via SO_ORIGINAL_DST.
         (None, None)
@@ -86,7 +104,9 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Seestar Proxy");
     println!("=============");
-    if let Some(uc) = upstream_control {
+    if let Some(ref dir) = config.replay {
+        println!("  Replay:     {}", dir.display());
+    } else if let Some(uc) = upstream_control {
         println!(
             "  Upstream:   {} (control), {} (imaging)",
             uc,
@@ -274,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
     let recorder_c = recorder.clone();
     let metrics_c = proxy_metrics.clone();
     let hooks_c = hook_engine.clone();
+    let replay_c = replay_session.clone();
     let control_handle = tokio::spawn(async move {
         if let Err(e) = control::run(
             bind_control,
@@ -282,6 +303,7 @@ async fn main() -> anyhow::Result<()> {
             recorder_c,
             Some(metrics_c),
             hooks_c,
+            replay_c,
         )
         .await
         {
@@ -291,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
 
     let recorder_i = recorder.clone();
     let metrics_i = proxy_metrics.clone();
+    let replay_i = replay_session.clone();
     let imaging_handle = tokio::spawn(async move {
         if let Err(e) = imaging::run(
             bind_imaging,
@@ -298,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
             transparent,
             recorder_i,
             Some(metrics_i),
+            replay_i,
         )
         .await
         {

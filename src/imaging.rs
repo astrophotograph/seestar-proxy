@@ -10,6 +10,7 @@
 use crate::metrics::Metrics;
 use crate::protocol::{FrameHeader, HEADER_SIZE};
 use crate::recorder::Recorder;
+use crate::replay::ReplaySession;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,6 +25,7 @@ pub async fn run(
     transparent: bool,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
+    replay: Option<Arc<ReplaySession>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!("Imaging proxy listening on {}", bind_addr);
@@ -37,8 +39,15 @@ pub async fn run(
         let _ = resolved_upstream.set(addr);
     }
 
-    // Upstream imaging connection with reconnect loop.
-    {
+    if let Some(session) = replay {
+        // ─── Replay mode ────────────────────────────────────────────────
+        let frame_tx_r = frame_tx.clone();
+        let metrics_r = metrics.clone();
+        tokio::spawn(async move {
+            crate::replay::replay_imaging(&session, &frame_tx_r, metrics_r.as_deref()).await;
+        });
+    } else {
+        // ─── Normal upstream connection ──────────────────────────────────
         let frame_tx = frame_tx.clone();
         let recorder = recorder.clone();
         let metrics = metrics.clone();

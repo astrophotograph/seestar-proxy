@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod ntp;
 pub mod protocol;
 pub mod recorder;
+pub mod replay;
 #[cfg(feature = "tailscale")]
 pub mod tailscale;
 #[cfg(unix)]

@@ -87,6 +87,7 @@ async fn start_proxy(telescope_addr: SocketAddr) -> SocketAddr {
         false,
         None,
         None,
+        None,
     ));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
     proxy_addr
@@ -223,6 +224,7 @@ async fn proxy_records_image_frames() {
         Some(telescope_addr),
         false,
         Some(recorder.clone()),
+        None,
         None,
     ));
     wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
