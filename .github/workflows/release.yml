@@ -83,6 +83,12 @@ jobs:
             deb_arch: ""
             features: "--features ntp"
             suffix: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use_cross: false
+            deb_arch: ""
+            features: "--no-default-features --features lua54,ntp"
+            suffix: ""
           # Tailscale variants (larger binary, includes Go runtime)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
@@ -114,6 +120,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Update version in Cargo.toml
+        shell: bash
         run: |
           VERSION="${{ needs.determine-version.outputs.version }}"
           sed -i.bak "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
@@ -168,8 +175,10 @@ jobs:
       - name: Rename binary
         shell: bash
         run: |
-          SRC="target/${{ matrix.target }}/release/seestar-proxy"
-          DEST="seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}"
+          EXT=""
+          [[ "${{ matrix.target }}" == *windows* ]] && EXT=".exe"
+          SRC="target/${{ matrix.target }}/release/seestar-proxy${EXT}"
+          DEST="seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}${EXT}"
           cp "$SRC" "$DEST"
           echo "Binary: $DEST ($(du -h "$DEST" | cut -f1))"
 
@@ -218,6 +227,7 @@ jobs:
           name: seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}
           path: |
             seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}
+            seestar-proxy${{ matrix.suffix }}-${{ matrix.target }}.exe
             *.deb
 
   build-ble:
@@ -321,7 +331,7 @@ jobs:
           for dir in artifacts/*/; do
             cp "$dir"/* release/
           done
-          chmod +x release/seestar-proxy* release/ble_scan-* release/ble_pair-*
+          chmod +x release/seestar-proxy* release/ble_scan-* release/ble_pair-* 2>/dev/null || true
           ls -lh release/
 
       - name: Create release
