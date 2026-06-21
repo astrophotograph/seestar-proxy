@@ -180,6 +180,23 @@ cross build --release --target armv7-unknown-linux-musleabihf
 cargo build --release --no-default-features
 ```
 
+## Development
+
+Common tasks are wrapped in a [`justfile`](justfile). Install [`just`](https://github.com/casey/just),
+then run `just` (or `just --list`) to see everything available:
+
+```bash
+just dev 192.168.1.50   # run against a telescope with discovery + debug logging
+just run --replay DIR   # forward arbitrary args to the proxy
+just test               # run unit + integration tests
+just lint               # cargo fmt + clippy -D warnings (the pre-commit gate)
+just coverage           # enforce the 75% line-coverage threshold
+just build-pi           # cross-compile a release build for 64-bit Raspberry Pi
+```
+
+The telescope address defaults to `seestar.local`; override it per-invocation
+(`just dev 192.168.1.50`) or via the `SEESTAR_UPSTREAM` environment variable.
+
 ## Architecture
 
 See [doc/architecture.md](doc/architecture.md) for internals.
