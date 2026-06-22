@@ -12,9 +12,9 @@ use seestar_proxy::protocol::HEADER_SIZE;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -77,6 +77,38 @@ async fn start_triggered_telescope() -> (SocketAddr, oneshot::Sender<Vec<Vec<u8>
     });
 
     (addr, tx)
+}
+
+/// Spawn a mock telescope that captures the JSON-RPC command lines the proxy
+/// sends upstream on the imaging port. Each complete line is forwarded to the
+/// returned channel so the test can assert on what the telescope received.
+async fn start_command_capturing_telescope() -> (SocketAddr, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (tx, rx) = mpsc::channel::<String>(16);
+
+    tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // proxy closed the upstream connection
+                Ok(_) => {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.is_empty() && tx.send(trimmed).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (addr, rx)
 }
 
 async fn start_proxy(telescope_addr: SocketAddr) -> SocketAddr {
@@ -201,6 +233,31 @@ async fn multiple_sequential_frames_arrive_in_order() {
             "frame {expected_byte} had wrong payload"
         );
     }
+}
+
+#[tokio::test]
+async fn client_command_is_forwarded_to_telescope() {
+    let (telescope_addr, mut commands) = start_command_capturing_telescope().await;
+    let proxy_addr = start_proxy(telescope_addr).await;
+
+    // A client sends an imaging-port command (e.g. issued when imaging starts).
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    client
+        .write_all(b"{\"id\":1,\"method\":\"begin_streaming\"}\r\n")
+        .await
+        .unwrap();
+    client.flush().await.unwrap();
+
+    // It must reach the upstream telescope. (The 5s heartbeat can't arrive
+    // within this 2s window, so the first captured line is the client's.)
+    let received = tokio::time::timeout(Duration::from_secs(2), commands.recv())
+        .await
+        .expect("telescope never received the forwarded command")
+        .expect("command channel closed");
+
+    let v: serde_json::Value = serde_json::from_str(&received).unwrap();
+    assert_eq!(v["method"], "begin_streaming");
+    assert_eq!(v["id"], 1);
 }
 
 #[tokio::test]

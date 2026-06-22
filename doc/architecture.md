@@ -170,9 +170,9 @@ control::run()
 
 ### `imaging.rs` — Binary Frame Fan-Out
 
-Simpler than the control path because imaging is unidirectional (telescope → clients only) and stateless.
+The imaging path is dominated by the downstream binary stream (telescope → clients), but it is bidirectional: clients also send JSON-RPC text commands upstream (a `test_connection` keepalive, and an imaging-start command issued alongside the one on the control port). Unlike the control path it is stateless — no ID remapping, because the telescope's imaging stream is binary frames, not per-client JSON responses.
 
-**Design:**
+**Downstream (telescope → clients):**
 
 1. A single upstream reader task reads frames from the telescope in a loop.
 2. Each frame's 80-byte header is parsed to determine payload size.
@@ -181,6 +181,10 @@ Simpler than the control path because imaging is unidirectional (telescope → c
 5. Each connected client has a task that receives from the broadcast and writes to the client socket.
 
 Frames larger than 50 MB are rejected as a sanity check. Late-joining clients miss frames that were broadcast before they subscribed—this is intentional, as imaging clients are expected to be continuously receiving.
+
+**Upstream (clients → telescope):**
+
+Every client handler and the proxy's own heartbeat send complete JSON lines through a single `mpsc::channel`, drained by one upstream writer task. Funnelling all senders through one writer means concurrent commands are never interleaved mid-line on the shared upstream connection. No ID remapping is applied (there are no per-client responses to route on this port). The writer lives across reconnects; if the upstream reader signals the connection died, it stops and the connect loop re-establishes it.
 
 ---
 

@@ -8,8 +8,8 @@ use crate::metrics::Metrics;
 use crate::protocol::{self, FrameHeader, HEADER_SIZE};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -161,11 +161,7 @@ pub async fn replay_control(
                     m.control_events.fetch_add(1, Ordering::Relaxed);
                 }
                 let method = protocol::method_name(&v).unwrap_or("?");
-                m.push_log_with_payload(
-                    "ctrl-rx",
-                    method.to_string(),
-                    Some(entry.raw.clone()),
-                );
+                m.push_log_with_payload("ctrl-rx", method.to_string(), Some(entry.raw.clone()));
             }
         }
 
@@ -193,7 +189,11 @@ pub async fn replay_imaging(
         let data = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
-                warn!("Replay: skipping unreadable frame {}: {}", path.display(), e);
+                warn!(
+                    "Replay: skipping unreadable frame {}: {}",
+                    path.display(),
+                    e
+                );
                 continue;
             }
         };

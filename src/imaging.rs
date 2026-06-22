@@ -4,18 +4,23 @@
 //! The upstream sends an 80-byte header followed by `size` bytes of payload.
 //! Each complete frame is broadcast to every connected client.
 //!
-//! The imaging port also uses JSON-RPC `test_connection` heartbeats (sent
-//! as text, not binary) to keep the connection alive.
+//! Traffic on the imaging port is mostly downstream (telescope → clients), but
+//! clients also send JSON-RPC text commands upstream — a `test_connection`
+//! heartbeat to keep the socket alive, and an imaging-start command issued
+//! alongside the one on the control port. All such client lines, plus the
+//! proxy's own heartbeat, are funnelled through a single mpsc channel to one
+//! upstream writer so they are never interleaved mid-line.
 
+use crate::control::{MAX_LINE_BYTES, read_line_limited};
 use crate::metrics::Metrics;
 use crate::protocol::{FrameHeader, HEADER_SIZE};
 use crate::recorder::Recorder;
 use crate::replay::ReplaySession;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 /// Run the imaging proxy.
@@ -32,6 +37,12 @@ pub async fn run(
 
     let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(32);
 
+    // Client → telescope command channel. Every client handler and the
+    // heartbeat task send complete JSON lines here; a single upstream writer
+    // drains it so concurrent senders never interleave mid-line. Created once
+    // and owned across reconnects (mirrors the control proxy).
+    let (upstream_tx, upstream_rx) = mpsc::channel::<String>(256);
+
     // In transparent mode, the upstream address may not be known yet.
     let resolved_upstream: Arc<tokio::sync::OnceCell<std::net::SocketAddr>> =
         Arc::new(tokio::sync::OnceCell::new());
@@ -41,6 +52,15 @@ pub async fn run(
 
     if let Some(session) = replay {
         // ─── Replay mode ────────────────────────────────────────────────
+        // Drain client commands so their `upstream_tx` doesn't see a closed
+        // channel (there is no telescope to forward to during replay).
+        tokio::spawn(async move {
+            let mut rx = upstream_rx;
+            while let Some(msg) = rx.recv().await {
+                debug!("Replay imaging drain: {}", &msg[..msg.len().min(120)]);
+            }
+        });
+
         let frame_tx_r = frame_tx.clone();
         let metrics_r = metrics.clone();
         tokio::spawn(async move {
@@ -52,7 +72,12 @@ pub async fn run(
         let recorder = recorder.clone();
         let metrics = metrics.clone();
         let resolved_upstream = resolved_upstream.clone();
+        let hb_tx = upstream_tx.clone();
+        let mut upstream_rx = upstream_rx;
         tokio::spawn(async move {
+            // Heartbeat: spawned once, feeds the shared command channel.
+            tokio::spawn(imaging_heartbeat_task(hb_tx));
+
             // Wait for the upstream address to be resolved.
             let upstream_addr = loop {
                 if let Some(&addr) = resolved_upstream.get() {
@@ -73,11 +98,37 @@ pub async fn run(
                     Ok(Ok(upstream)) => {
                         let _ = upstream.set_nodelay(true);
                         info!("Connected to telescope imaging at {}", upstream_addr);
-                        let (upstream_reader, upstream_writer) = upstream.into_split();
-                        // Run reader and heartbeat concurrently; reconnect when either stops.
-                        tokio::select! {
-                            _ = upstream_reader_task(upstream_reader, frame_tx.clone(), recorder.clone(), metrics.clone()) => {}
-                            _ = imaging_heartbeat_task(upstream_writer) => {}
+                        let (upstream_reader, mut upstream_writer) = upstream.into_split();
+
+                        // The reader task signals (by dropping this sender) when
+                        // the connection dies, so the writer loop stops and reconnects.
+                        let (reader_dead_tx, mut reader_dead_rx) = oneshot::channel::<()>();
+                        tokio::spawn(upstream_reader_task(
+                            upstream_reader,
+                            frame_tx.clone(),
+                            recorder.clone(),
+                            metrics.clone(),
+                            reader_dead_tx,
+                        ));
+
+                        // Forward queued commands to the telescope until the
+                        // reader dies or all client senders are dropped.
+                        loop {
+                            tokio::select! {
+                                msg = upstream_rx.recv() => match msg {
+                                    None => return, // all senders dropped; shut down
+                                    Some(msg) => {
+                                        debug!("Imaging -> telescope: {}", &msg[..msg.len().min(200)]);
+                                        let line = format!("{}\r\n", msg);
+                                        if let Err(e) = upstream_writer.write_all(line.as_bytes()).await {
+                                            error!("Imaging upstream write error: {}", e);
+                                            break;
+                                        }
+                                        let _ = upstream_writer.flush().await;
+                                    }
+                                },
+                                _ = &mut reader_dead_rx => break, // reader exited; reconnect
+                            }
                         }
                         warn!("Telescope imaging connection lost");
                     }
@@ -112,12 +163,15 @@ pub async fn run(
         }
 
         let frame_rx = frame_tx.subscribe();
+        let upstream_tx_c = upstream_tx.clone();
         let metrics_c = metrics.clone();
         if let Some(m) = &metrics {
             m.imaging_clients.fetch_add(1, Ordering::Relaxed);
         }
         tokio::spawn(async move {
-            if let Err(e) = handle_client(client_stream, frame_rx).await {
+            if let Err(e) =
+                handle_client(client_stream, frame_rx, upstream_tx_c, metrics_c.clone()).await
+            {
                 debug!("Imaging client {} error: {}", client_addr, e);
             }
             if let Some(m) = &metrics_c {
@@ -128,8 +182,9 @@ pub async fn run(
     }
 }
 
-/// Send periodic heartbeats on the imaging connection.
-async fn imaging_heartbeat_task(mut writer: tokio::net::tcp::OwnedWriteHalf) {
+/// Send periodic heartbeats on the imaging connection via the shared upstream
+/// command channel. The imaging port accepts JSON-RPC text for control commands.
+async fn imaging_heartbeat_task(upstream_tx: mpsc::Sender<String>) {
     let mut id: u64 = 1;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -139,14 +194,8 @@ async fn imaging_heartbeat_task(mut writer: tokio::net::tcp::OwnedWriteHalf) {
         );
         id += 1;
         debug!("Imaging heartbeat: {}", msg);
-        // The imaging port accepts JSON-RPC text for control commands.
-        let line = format!("{}\r\n", msg);
-        if writer.write_all(line.as_bytes()).await.is_err() {
-            error!("Imaging heartbeat write failed");
-            break;
-        }
-        if writer.flush().await.is_err() {
-            error!("Imaging heartbeat flush failed");
+        if upstream_tx.send(msg).await.is_err() {
+            // Receiver gone — the upstream task has shut down.
             break;
         }
     }
@@ -154,11 +203,15 @@ async fn imaging_heartbeat_task(mut writer: tokio::net::tcp::OwnedWriteHalf) {
 }
 
 /// Read frames from the upstream telescope and broadcast them.
+///
+/// `_done_tx` is dropped when this task returns, which signals the writer loop
+/// (via its paired receiver) that the connection has died and must reconnect.
 async fn upstream_reader_task(
     mut reader: impl AsyncReadExt + Unpin,
     frame_tx: broadcast::Sender<Arc<Vec<u8>>>,
     recorder: Option<Arc<Recorder>>,
     metrics: Option<Arc<Metrics>>,
+    _done_tx: oneshot::Sender<()>,
 ) {
     if let Some(m) = &metrics {
         m.upstream_imaging_up.store(true, Ordering::Relaxed);
@@ -243,28 +296,77 @@ async fn upstream_reader_task(
     info!("Upstream imaging reader stopped");
 }
 
-/// Forward broadcast frames to a single client.
+/// Handle a single imaging client: fan broadcast frames out to it (in a
+/// background task) while reading JSON-RPC command lines from it and forwarding
+/// them to the telescope via the shared upstream channel.
 async fn handle_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     mut frame_rx: broadcast::Receiver<Arc<Vec<u8>>>,
+    upstream_tx: mpsc::Sender<String>,
+    metrics: Option<Arc<Metrics>>,
 ) -> anyhow::Result<()> {
-    loop {
-        let frame = match frame_rx.recv().await {
-            Ok(f) => f,
-            // The client fell behind and missed some frames. Skip them and
-            // continue — dropping frames is preferable to dropping the client.
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                debug!("Imaging client lagged, skipped {} frames", n);
-                continue;
+    let (reader, mut writer) = stream.into_split();
+
+    // Frame fan-out task: telescope → this client. Kept so we can abort it when
+    // the read loop ends, dropping the write half so the client sees EOF.
+    let frame_task = tokio::spawn(async move {
+        loop {
+            let frame = match frame_rx.recv().await {
+                Ok(f) => f,
+                // The client fell behind and missed some frames. Skip them and
+                // continue — dropping frames is preferable to dropping the client.
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    debug!("Imaging client lagged, skipped {} frames", n);
+                    continue;
+                }
+                // The sender was dropped; no more frames will arrive.
+                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            if writer.write_all(&frame).await.is_err() {
+                break;
             }
-            // The sender was dropped; no more frames will arrive.
-            Err(broadcast::error::RecvError::Closed) => break,
-        };
-        if stream.write_all(&frame).await.is_err() {
+            let _ = writer.flush().await;
+        }
+    });
+
+    // Read loop: this client → telescope. Forward each complete JSON line.
+    let mut reader = BufReader::new(reader);
+    let mut line_buf = Vec::new();
+    loop {
+        line_buf.clear();
+        let n = read_line_limited(&mut reader, &mut line_buf, MAX_LINE_BYTES).await?;
+        if n == 0 {
+            break; // client closed the connection
+        }
+        if line_buf.len() > MAX_LINE_BYTES {
+            warn!(
+                "Imaging client sent oversized line ({} bytes), disconnecting",
+                line_buf.len()
+            );
             break;
         }
-        let _ = stream.flush().await;
+
+        let trimmed = String::from_utf8_lossy(&line_buf).trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Some(m) = &metrics {
+            let method = serde_json::from_str::<serde_json::Value>(&trimmed)
+                .ok()
+                .and_then(|v| crate::protocol::method_name(&v).map(str::to_string))
+                .unwrap_or_else(|| "?".to_string());
+            m.push_log_with_payload("img-tx", method, Some(trimmed.clone()));
+        }
+
+        if upstream_tx.send(trimmed).await.is_err() {
+            error!("Imaging upstream channel closed — telescope connection lost");
+            break;
+        }
     }
+
+    // Drop the write half so the client promptly sees EOF.
+    frame_task.abort();
     Ok(())
 }
 
@@ -305,7 +407,13 @@ mod tests {
         let mut rx1 = frame_tx.subscribe();
         let mut rx2 = frame_tx.subscribe();
 
-        tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
+        tokio::spawn(upstream_reader_task(
+            server,
+            frame_tx,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         let header = make_header(5, 0, 0, 0);
         mock_telescope.write_all(&header).await.unwrap();
@@ -334,7 +442,13 @@ mod tests {
         let (mut mock_telescope, server) = loopback_pair().await;
         let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(16);
 
-        let task = tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
+        let task = tokio::spawn(upstream_reader_task(
+            server,
+            frame_tx,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         // Claim payload is 60 MB — exceeds the 50 MB sanity limit
         let header = make_header(60_000_000, 20, 1920, 1080);
@@ -354,7 +468,13 @@ mod tests {
         let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(16);
         let mut rx = frame_tx.subscribe();
 
-        tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
+        tokio::spawn(upstream_reader_task(
+            server,
+            frame_tx,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         let header = make_header(4, 21, 640, 480);
         let payload = [0x01u8, 0x02, 0x03, 0x04];
@@ -378,7 +498,13 @@ mod tests {
         let (frame_tx, _) = broadcast::channel::<Arc<Vec<u8>>>(16);
         let mut rx = frame_tx.subscribe();
 
-        tokio::spawn(upstream_reader_task(server, frame_tx, None, None));
+        tokio::spawn(upstream_reader_task(
+            server,
+            frame_tx,
+            None,
+            None,
+            oneshot::channel().0,
+        ));
 
         for i in 0u8..3 {
             let header = make_header(1, 21, 10, 10);
@@ -420,7 +546,8 @@ mod tests {
         let client_stream = TcpStream::connect(addr).await.unwrap();
         let (mut server_side, _) = listener.accept().await.unwrap();
 
-        let task = tokio::spawn(handle_client(client_stream, lagged_rx));
+        let (upstream_tx, _upstream_rx) = mpsc::channel::<String>(8);
+        let task = tokio::spawn(handle_client(client_stream, lagged_rx, upstream_tx, None));
 
         // Give handle_client a moment to encounter the Lagged error.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -452,7 +579,8 @@ mod tests {
 
         // Spawn the client handler connecting to our listener
         let client_conn = TcpStream::connect(addr).await.unwrap();
-        tokio::spawn(handle_client(client_conn, frame_rx));
+        let (upstream_tx, _upstream_rx) = mpsc::channel::<String>(8);
+        tokio::spawn(handle_client(client_conn, frame_rx, upstream_tx, None));
 
         let (mut server_side, _) = listener.accept().await.unwrap();
 
@@ -466,5 +594,72 @@ mod tests {
             .unwrap();
 
         assert_eq!(buf, vec![0xCA; 32]);
+    }
+
+    // ── handle_client: client → upstream forwarding ───────────────────────────
+
+    #[tokio::test]
+    async fn handle_client_forwards_client_line_upstream() {
+        let (mut client, server) = loopback_pair().await;
+        let (_frame_tx, frame_rx) = broadcast::channel::<Arc<Vec<u8>>>(16);
+        let (upstream_tx, mut upstream_rx) = mpsc::channel::<String>(16);
+
+        tokio::spawn(handle_client(server, frame_rx, upstream_tx, None));
+
+        client
+            .write_all(b"{\"id\":1,\"method\":\"begin_streaming\"}\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), upstream_rx.recv())
+            .await
+            .expect("timed out waiting for forwarded command")
+            .expect("upstream channel closed");
+
+        let v: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        assert_eq!(v["method"], "begin_streaming");
+        assert_eq!(v["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn handle_client_skips_empty_client_lines() {
+        let (mut client, server) = loopback_pair().await;
+        let (_frame_tx, frame_rx) = broadcast::channel::<Arc<Vec<u8>>>(16);
+        let (upstream_tx, mut upstream_rx) = mpsc::channel::<String>(16);
+
+        tokio::spawn(handle_client(server, frame_rx, upstream_tx, None));
+
+        // Blank lines before a real command — only the real one is forwarded.
+        client
+            .write_all(b"\r\n   \r\n{\"id\":2,\"method\":\"get_view_state\"}\r\n")
+            .await
+            .unwrap();
+        client.flush().await.unwrap();
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), upstream_rx.recv())
+            .await
+            .expect("timed out")
+            .expect("upstream channel closed");
+        let v: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        assert_eq!(v["method"], "get_view_state");
+    }
+
+    #[tokio::test]
+    async fn handle_client_returns_when_client_disconnects() {
+        let (client, server) = loopback_pair().await;
+        let (_frame_tx, frame_rx) = broadcast::channel::<Arc<Vec<u8>>>(16);
+        let (upstream_tx, _upstream_rx) = mpsc::channel::<String>(16);
+
+        let task = tokio::spawn(handle_client(server, frame_rx, upstream_tx, None));
+
+        // Client goes away — the read loop hits EOF and the handler returns.
+        drop(client);
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("handle_client did not exit after client disconnect")
+            .unwrap()
+            .unwrap();
     }
 }

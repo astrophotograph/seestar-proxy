@@ -532,7 +532,7 @@ async fn handle_client(
 
 /// Read a line (up to `\n`) from reader into `buf`, stopping at `limit` bytes.
 /// Returns the number of bytes read (0 = EOF).
-async fn read_line_limited(
+pub(crate) async fn read_line_limited(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     buf: &mut Vec<u8>,
     limit: usize,
