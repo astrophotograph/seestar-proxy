@@ -42,10 +42,10 @@ Integration tests are in `tests/`.
 
 ### Code coverage
 
-CI enforces a **75% line coverage threshold** using `cargo-llvm-cov`:
+CI enforces a **80% line coverage threshold** using `cargo-llvm-cov`:
 
 ```bash
-cargo llvm-cov --features wireguard,luajit,ntp --lcov --output-path lcov.info --fail-under-lines 75
+cargo llvm-cov --features wireguard,luajit,ntp --lcov --output-path lcov.info --fail-under-lines 80
 ```
 
 Do not use `--all-features`: combining `lua54 + luajit` breaks `mlua-sys`, and `tailscale`

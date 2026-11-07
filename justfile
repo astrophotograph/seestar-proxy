@@ -70,9 +70,9 @@ test-mod module:
     cargo test --lib {{module}}
 
 # Do NOT use --all-features: lua54+luajit breaks mlua-sys, tailscale needs Go.
-# Enforce the CI line-coverage threshold (75%) with cargo-llvm-cov.
+# Enforce the CI line-coverage threshold (80%) with cargo-llvm-cov.
 coverage:
-    cargo llvm-cov --features wireguard,luajit,ntp --lcov --output-path lcov.info --fail-under-lines 75
+    cargo llvm-cov --features wireguard,luajit,ntp --lcov --output-path lcov.info --fail-under-lines 80
 
 # ── Lint & format ────────────────────────────────────────────────────────────
 
