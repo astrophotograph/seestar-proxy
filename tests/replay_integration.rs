@@ -217,3 +217,104 @@ mod round_trip {
         assert!(!metrics.telescope_status().is_stacking);
     }
 }
+
+// ── Metrics state from real firmware bytes ───────────────────────────────────
+
+/// Feed every telescope-direction message of the vendored session into `Metrics`,
+/// the way the control task does: `Event` messages via `update_event`, method
+/// responses via `update_response`.
+fn replay_into_metrics() -> std::sync::Arc<seestar_proxy::metrics::Metrics> {
+    let session = ReplaySession::load(&fixture_dir()).unwrap();
+    let metrics = seestar_proxy::metrics::Metrics::new();
+    for entry in &session.control_messages {
+        let msg: serde_json::Value = serde_json::from_str(&entry.raw).unwrap();
+        if let Some(event) = msg.get("Event").and_then(|v| v.as_str()) {
+            metrics.update_event(event, &msg);
+        } else {
+            metrics.update_response(&msg);
+        }
+    }
+    metrics
+}
+
+#[test]
+fn metrics_replay_vendored_session_sets_battery_from_pi_status() {
+    let snap = replay_into_metrics().telescope_status();
+    assert_eq!(snap.battery, Some(39));
+}
+
+#[test]
+fn metrics_replay_vendored_session_sets_temperature_from_last_pi_status() {
+    let snap = replay_into_metrics().telescope_status();
+    // The last PiStatus event (line 445) follows the last get_device_state response (44.4).
+    assert_eq!(snap.temperature, Some(43.099998));
+}
+
+#[test]
+fn metrics_replay_vendored_session_sets_charger_status_from_device_state() {
+    let snap = replay_into_metrics().telescope_status();
+    assert_eq!(snap.charger_status.as_deref(), Some("Discharging"));
+}
+
+// ── Sibling seestar-fixtures sweep ───────────────────────────────────────────
+
+/// Session directories (containing `manifest.json`) up to `depth` levels below `root`.
+fn find_sessions(root: &std::path::Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if root.join("manifest.json").is_file() {
+        out.push(root.to_path_buf());
+        return;
+    }
+    if depth == 0 {
+        return;
+    }
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for entry in rd.flatten() {
+            if entry.path().is_dir() {
+                find_sessions(&entry.path(), depth - 1, out);
+            }
+        }
+    }
+}
+
+#[test]
+fn replay_session_load_sibling_fixtures_match_their_manifests() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../seestar-fixtures");
+    if !root.is_dir() {
+        eprintln!("Skipping: seestar-fixtures not found at {}", root.display());
+        return;
+    }
+    let mut sessions = Vec::new();
+    find_sessions(&root, 2, &mut sessions);
+    sessions.sort();
+    for dir in sessions {
+        let session = ReplaySession::load(&dir)
+            .unwrap_or_else(|e| panic!("{} failed to load: {e}", dir.display()));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        if let Ok(text) = std::fs::read_to_string(dir.join("control.jsonl")) {
+            let (mut telescope, mut total) = (0usize, 0usize);
+            for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                total += 1;
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                if v["direction"] == "telescope" {
+                    telescope += 1;
+                }
+            }
+            assert_eq!(
+                session.control_messages.len(),
+                telescope,
+                "{}",
+                dir.display()
+            );
+            if let Some(n) = manifest["control_message_count"].as_u64() {
+                assert_eq!(n as usize, total, "{}", dir.display());
+            }
+        }
+        if let Some(n) = manifest["frame_count"].as_u64()
+            && dir.join("frames").is_dir()
+        {
+            assert_eq!(session.frame_paths.len(), n as usize, "{}", dir.display());
+        }
+    }
+}
