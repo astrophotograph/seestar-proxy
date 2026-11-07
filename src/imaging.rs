@@ -662,4 +662,34 @@ mod tests {
             .unwrap()
             .unwrap();
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn imaging_heartbeat_task_every_5s_sends_incrementing_ids_through_channel() {
+        let (tx, mut rx) = mpsc::channel::<String>(16);
+        let task = tokio::spawn(imaging_heartbeat_task(tx));
+
+        // Nothing is sent before the first 5 s interval elapses.
+        tokio::time::advance(Duration::from_millis(4_900)).await;
+        assert!(rx.try_recv().is_err());
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            tokio::time::advance(Duration::from_secs(5)).await;
+            let msg = rx.recv().await.expect("heartbeat message");
+            let v: serde_json::Value = serde_json::from_str(&msg).unwrap();
+            assert_eq!(v["method"], "test_connection");
+            ids.push(v["id"].as_u64().unwrap());
+            // Exactly one heartbeat per interval.
+            assert!(rx.try_recv().is_err());
+        }
+        assert_eq!(ids, vec![1, 2, 3]);
+
+        // Dropping the receiver stops the task at the next heartbeat.
+        drop(rx);
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("heartbeat task did not stop after receiver dropped")
+            .unwrap();
+    }
 }

@@ -1319,4 +1319,153 @@ mod tests {
         assert_eq!(second, 10_001);
         assert_eq!(third, 10_002);
     }
+
+    // ── heartbeat gating (paused time) ────────────────────────────────────────
+
+    /// Commands for the mock telescope used by the heartbeat tests.
+    enum TelescopeCmd {
+        /// Write a line to the current connection (completes the handshake).
+        Send(String),
+        /// Close the current connection (forces the proxy to reconnect).
+        Drop,
+    }
+
+    /// Mock telescope: accepts connections sequentially, forwards every received line to
+    /// the lines channel, and signals the accepted channel on each accept.
+    async fn start_scripted_telescope() -> (
+        std::net::SocketAddr,
+        mpsc::Sender<TelescopeCmd>,
+        mpsc::UnboundedReceiver<String>,
+        mpsc::UnboundedReceiver<()>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<TelescopeCmd>(8);
+        let (lines_tx, lines_rx) = mpsc::unbounded_channel::<String>();
+        let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<()>();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let _ = accepted_tx.send(());
+                let (r, mut w) = stream.into_split();
+                let mut r = BufReader::new(r);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    tokio::select! {
+                        n = r.read_line(&mut line) => {
+                            if n.unwrap_or(0) == 0 { break; }
+                            let _ = lines_tx.send(line.trim().to_string());
+                        }
+                        cmd = cmd_rx.recv() => match cmd {
+                            Some(TelescopeCmd::Send(s)) => {
+                                w.write_all(format!("{s}\r\n").as_bytes()).await.unwrap();
+                            }
+                            Some(TelescopeCmd::Drop) | None => break,
+                        },
+                    }
+                }
+            }
+        });
+        (addr, cmd_tx, lines_rx, accepted_rx)
+    }
+
+    /// Start `run()` against `telescope` and connect one client so the upstream task starts.
+    async fn start_proxy_with_client(telescope: std::net::SocketAddr) -> TcpStream {
+        let bind = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        tokio::spawn(run(bind, Some(telescope), false, None, None, None, None));
+        loop {
+            if let Ok(c) = TcpStream::connect(bind).await {
+                return c;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    const HANDSHAKE_REPLY: &str = r#"{"id":1,"code":0,"result":null}"#;
+
+    #[tokio::test(start_paused = true)]
+    async fn control_heartbeat_handshake_pending_sends_nothing() {
+        let (addr, _cmd, mut lines, mut accepted) = start_scripted_telescope().await;
+        let _client = start_proxy_with_client(addr).await;
+        accepted.recv().await.expect("proxy connected upstream");
+
+        // Four heartbeat intervals with no telescope response: nothing must be sent.
+        let res = tokio::time::timeout(Duration::from_secs(20), lines.recv()).await;
+        assert!(res.is_err(), "unexpected upstream line: {res:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_heartbeat_handshake_done_sends_test_connection_every_5s() {
+        let (addr, cmd, mut lines, mut accepted) = start_scripted_telescope().await;
+        let _client = start_proxy_with_client(addr).await;
+        accepted.recv().await.expect("proxy connected upstream");
+        cmd.send(TelescopeCmd::Send(HANDSHAKE_REPLY.into()))
+            .await
+            .unwrap();
+
+        let mut ids = Vec::new();
+        let mut last = tokio::time::Instant::now();
+        for i in 0..3 {
+            let line = tokio::time::timeout(Duration::from_secs(6), lines.recv())
+                .await
+                .expect("heartbeat within one interval")
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(v["method"], "test_connection");
+            ids.push(v["id"].as_u64().unwrap());
+            let now = tokio::time::Instant::now();
+            if i > 0 {
+                // Paused time auto-advances while real loopback IO is in flight, so the
+                // observed gap jitters around the 5 s cadence; bound it well away from
+                // both "every tick missed" (10 s) and "much faster than 5 s".
+                let gap = now - last;
+                assert!(
+                    gap > Duration::from_secs(3) && gap < Duration::from_secs(7),
+                    "gap {gap:?}"
+                );
+            }
+            last = now;
+        }
+        assert_eq!(ids, vec![100_000, 100_001, 100_002]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn control_heartbeat_reconnect_resets_gate_until_new_handshake() {
+        let (addr, cmd, mut lines, mut accepted) = start_scripted_telescope().await;
+        let _client = start_proxy_with_client(addr).await;
+        accepted.recv().await.expect("proxy connected upstream");
+        cmd.send(TelescopeCmd::Send(HANDSHAKE_REPLY.into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(6), lines.recv())
+            .await
+            .expect("heartbeat while handshake done")
+            .unwrap();
+
+        // Telescope drops the connection; the proxy reconnects and re-gates the heartbeat.
+        cmd.send(TelescopeCmd::Drop).await.unwrap();
+        accepted.recv().await.expect("proxy reconnected");
+        // A heartbeat queued before the reset may be flushed on connect; discard it.
+        while tokio::time::timeout(Duration::from_millis(100), lines.recv())
+            .await
+            .is_ok()
+        {}
+
+        let res = tokio::time::timeout(Duration::from_secs(20), lines.recv()).await;
+        assert!(res.is_err(), "heartbeat sent after reconnect: {res:?}");
+
+        // A fresh telescope response reopens the gate.
+        cmd.send(TelescopeCmd::Send(HANDSHAKE_REPLY.into()))
+            .await
+            .unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(6), lines.recv())
+            .await
+            .expect("heartbeat resumes after new handshake")
+            .unwrap();
+        assert!(line.contains("test_connection"));
+    }
 }
