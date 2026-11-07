@@ -1,0 +1,11 @@
+{
+  "capture_date": "2026-03-31T05:12:08.108791855+00:00",
+  "telescope_model": null,
+  "firmware_version": null,
+  "frame_count": 0,
+  "preview_frame_count": 0,
+  "stack_frame_count": 0,
+  "control_message_count": 449,
+  "duration_seconds": 161.717695077,
+  "source": "seestar-proxy"
+}

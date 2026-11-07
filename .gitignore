@@ -2,3 +2,4 @@
 session_*/
 logs/
 hooks/
+!/tests/data/session_*/
