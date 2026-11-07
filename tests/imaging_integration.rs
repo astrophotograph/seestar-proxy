@@ -447,3 +447,39 @@ async fn imaging_upstream_up_metric_flips_false_on_mid_payload_drop_and_true_aft
     // Reconnect happens after the proxy's retry delay.
     wait_for_imaging_up(&metrics, true).await;
 }
+
+/// CHARACTERIZATION TEST — pins current behaviour, not necessarily correct
+/// behaviour. The imaging client handler (`src/imaging.rs`) does no JSON
+/// validation: a non-JSON line is forwarded upstream raw (only the method label
+/// in the log falls back to `"?"`). Whether forward-raw is the right policy is
+/// for the bug-review task to judge; if the proxy starts rejecting or dropping
+/// malformed input, this test is expected to fail and be revisited.
+#[tokio::test]
+async fn imaging_client_malformed_json_line_is_forwarded_upstream_raw_and_connection_stays_up() {
+    let (telescope_addr, mut commands) = start_command_capturing_telescope().await;
+    let proxy_addr = start_proxy(telescope_addr).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+    client.write_all(b"this is not json\r\n").await.unwrap();
+    client.flush().await.unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(2), commands.recv())
+        .await
+        .expect("telescope never received the malformed line")
+        .expect("command channel closed");
+    assert_eq!(received, "this is not json");
+
+    // The client connection must still be usable: a valid command sent next
+    // is forwarded too.
+    client
+        .write_all(b"{\"id\":2,\"method\":\"begin_streaming\"}\r\n")
+        .await
+        .unwrap();
+    client.flush().await.unwrap();
+    let next = tokio::time::timeout(Duration::from_secs(2), commands.recv())
+        .await
+        .expect("connection did not survive the malformed line")
+        .expect("command channel closed");
+    let v: serde_json::Value = serde_json::from_str(&next).unwrap();
+    assert_eq!(v["id"], 2);
+}
