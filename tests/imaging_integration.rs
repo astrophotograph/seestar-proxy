@@ -312,3 +312,138 @@ async fn proxy_records_image_frames() {
         "expected a preview frame file"
     );
 }
+
+// ── mid-frame disconnect / reconnect ──────────────────────────────────────────
+
+/// Mock telescope that serves two consecutive upstream connections.
+///
+/// On the first connection it waits for bytes on `first_tx`, writes them and
+/// closes the socket (so the test can send a header + truncated payload).
+/// It then accepts the proxy's reconnect and, once bytes arrive on
+/// `second_tx`, writes them and keeps the socket open.
+struct TwoSessionTelescope {
+    addr: SocketAddr,
+    first_tx: oneshot::Sender<Vec<u8>>,
+    second_tx: oneshot::Sender<Vec<u8>>,
+}
+
+async fn start_two_session_telescope() -> TwoSessionTelescope {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (first_tx, first_rx) = oneshot::channel::<Vec<u8>>();
+    let (second_tx, second_rx) = oneshot::channel::<Vec<u8>>();
+
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        if let Ok(bytes) = first_rx.await {
+            let _ = stream.write_all(&bytes).await;
+            let _ = stream.flush().await;
+        }
+        drop(stream); // mid-frame close
+
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        if let Ok(bytes) = second_rx.await {
+            let _ = stream.write_all(&bytes).await;
+            let _ = stream.flush().await;
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    TwoSessionTelescope {
+        addr,
+        first_tx,
+        second_tx,
+    }
+}
+
+async fn start_proxy_with_metrics(
+    telescope_addr: SocketAddr,
+) -> (SocketAddr, Arc<seestar_proxy::metrics::Metrics>) {
+    let metrics = seestar_proxy::metrics::Metrics::new();
+    let proxy_addr = free_addr();
+    tokio::spawn(seestar_proxy::imaging::run(
+        proxy_addr,
+        Some(telescope_addr),
+        false,
+        None,
+        Some(metrics.clone()),
+        None,
+    ));
+    wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
+    (proxy_addr, metrics)
+}
+
+/// Wait (bounded) until `upstream_imaging_up` equals `expected`.
+async fn wait_for_imaging_up(metrics: &seestar_proxy::metrics::Metrics, expected: bool) {
+    use std::sync::atomic::Ordering;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while metrics.upstream_imaging_up.load(Ordering::Relaxed) != expected {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("upstream_imaging_up never became {expected}"));
+}
+
+/// Header plus only the first half of the payload.
+fn truncated_frame() -> Vec<u8> {
+    let full = make_frame(2000, 21, 100, 100, 0x11);
+    full[..HEADER_SIZE + 1000].to_vec()
+}
+
+#[tokio::test]
+async fn imaging_upstream_dropped_mid_payload_keeps_client_connected_without_partial_frame() {
+    let t = start_two_session_telescope().await;
+    let (proxy_addr, metrics) = start_proxy_with_metrics(t.addr).await;
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+
+    wait_for_imaging_up(&metrics, true).await;
+    t.first_tx.send(truncated_frame()).unwrap();
+    wait_for_imaging_up(&metrics, false).await;
+
+    // Nothing (no partial frame, no EOF) must reach the still-connected client.
+    let mut buf = [0u8; 1];
+    let res = tokio::time::timeout(Duration::from_millis(200), client.read(&mut buf)).await;
+    assert!(
+        res.is_err(),
+        "client got data or EOF after upstream drop: {res:?}"
+    );
+}
+
+#[tokio::test]
+async fn imaging_reconnect_after_mid_payload_drop_delivers_next_frame_to_existing_client() {
+    let t = start_two_session_telescope().await;
+    let (proxy_addr, metrics) = start_proxy_with_metrics(t.addr).await;
+    let mut client = TcpStream::connect(proxy_addr).await.unwrap();
+
+    wait_for_imaging_up(&metrics, true).await;
+    t.first_tx.send(truncated_frame()).unwrap();
+    wait_for_imaging_up(&metrics, false).await;
+
+    let frame = make_frame(2000, 21, 100, 100, 0x22);
+    t.second_tx.send(frame.clone()).unwrap();
+
+    // Proxy retries after a fixed 5 s delay; allow for it.
+    let mut buf = vec![0u8; frame.len()];
+    tokio::time::timeout(Duration::from_secs(15), client.read_exact(&mut buf))
+        .await
+        .expect("frame never arrived after reconnect")
+        .expect("read error");
+    assert_eq!(buf, frame);
+}
+
+#[tokio::test]
+async fn imaging_upstream_up_metric_flips_false_on_mid_payload_drop_and_true_after_reconnect() {
+    let t = start_two_session_telescope().await;
+    let (_proxy_addr, metrics) = start_proxy_with_metrics(t.addr).await;
+
+    wait_for_imaging_up(&metrics, true).await;
+    t.first_tx.send(truncated_frame()).unwrap();
+    wait_for_imaging_up(&metrics, false).await;
+    // Reconnect happens after the proxy's retry delay.
+    wait_for_imaging_up(&metrics, true).await;
+}
