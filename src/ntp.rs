@@ -115,6 +115,30 @@ mod tests {
         }
     }
 
+    /// `.invalid` is reserved (RFC 6761) and never resolves, so this fails at DNS lookup.
+    #[test]
+    fn sync_unresolvable_hostname_returns_error() {
+        let result = sync("ntp.seestar-proxy-test.invalid");
+        assert!(result.is_err(), "sync must fail for an unresolvable host");
+    }
+
+    #[test]
+    fn sync_unresolvable_hostname_error_mentions_ntp_query_failed() {
+        let msg = sync("ntp.seestar-proxy-test.invalid")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("NTP query failed"),
+            "error must say 'NTP query failed', got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn sync_empty_server_returns_error() {
+        assert!(sync("").is_err(), "sync must fail for an empty server name");
+    }
+
     #[test]
     fn drift_threshold_is_positive() {
         assert!(DRIFT_THRESHOLD_SECS > 0.0);
