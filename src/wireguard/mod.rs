@@ -825,6 +825,553 @@ mod tests {
             "product_model must mention Seestar"
         );
     }
+
+    // ── shared helpers for the tests below ────────────────────────────────────
+
+    const CLIENT_IP: [u8; 4] = [10, 99, 0, 2];
+    const SERVER_IP: [u8; 4] = [10, 99, 0, 1];
+
+    /// Build a minimal IPv4/UDP packet.
+    fn udp_packet(
+        src_ip: [u8; 4],
+        dst_ip: [u8; 4],
+        src_port: u16,
+        dst_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let total = 28 + payload.len();
+        let mut p = vec![0u8; total];
+        p[0] = 0x45;
+        p[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        p[9] = 17;
+        p[12..16].copy_from_slice(&src_ip);
+        p[16..20].copy_from_slice(&dst_ip);
+        p[20..22].copy_from_slice(&src_port.to_be_bytes());
+        p[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        p[24..26].copy_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
+        p[28..].copy_from_slice(payload);
+        p
+    }
+
+    fn scan_request_packet(src_port: u16) -> Vec<u8> {
+        let body = br#"{"id":201,"method":"scan_iscope"}"#;
+        udp_packet(
+            CLIENT_IP,
+            [255, 255, 255, 255],
+            src_port,
+            crate::protocol::DISCOVERY_PORT,
+            body,
+        )
+    }
+
+    fn dns_query_packet(name: &str) -> Vec<u8> {
+        let mut q = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        for label in name.split('.') {
+            q.push(label.len() as u8);
+            q.extend_from_slice(label.as_bytes());
+        }
+        q.push(0);
+        q.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        udp_packet(CLIENT_IP, [8, 8, 8, 8], 40000, 53, &q)
+    }
+
+    /// Receive one datagram, failing (rather than hanging) if none arrives.
+    async fn recv_datagram(sock: &UdpSocket) -> Vec<u8> {
+        let mut buf = vec![0u8; 2048];
+        let (n, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), sock.recv_from(&mut buf))
+                .await
+                .expect("timed out waiting for datagram")
+                .unwrap();
+        buf.truncate(n);
+        buf
+    }
+
+    /// A server `Tunn` and a matching client `Tunn`.
+    fn make_tunn_pair() -> (Tunn, Tunn) {
+        use rand_core::OsRng;
+        use x25519_dalek::{PublicKey, StaticSecret};
+        let server_private = StaticSecret::random_from_rng(OsRng);
+        let client_private = StaticSecret::random_from_rng(OsRng);
+        let server_public = PublicKey::from(&server_private);
+        let client_public = PublicKey::from(&client_private);
+        let server = Tunn::new(server_private, client_public, None, None, 0, None);
+        let client = Tunn::new(client_private, server_public, None, None, 1, None);
+        (server, client)
+    }
+
+    /// A TCP port that nothing is listening on.
+    fn closed_tcp_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// Serve one TCP connection on loopback: read a line, reply with `reply`.
+    async fn one_shot_tcp_server(reply: &'static str) -> u16 {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (r, mut w) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(r).read_line(&mut line).await.unwrap();
+            w.write_all(reply.as_bytes()).await.unwrap();
+        });
+        port
+    }
+
+    // ── start() error branches ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn start_ipv6_upstream_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let result = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &dir.path().join("wg.key"),
+            Some("127.0.0.1:0".into()),
+            "::1".parse().unwrap(),
+            4700,
+            4800,
+            c_tx,
+            i_tx,
+        )
+        .await;
+        let err = result.err().expect("IPv6 upstream must be rejected");
+        assert!(err.to_string().contains("IPv4"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn start_corrupt_server_key_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("wg.key");
+        std::fs::write(&key, "!!! not base64 !!!").unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let result = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &key,
+            None,
+            "127.0.0.1".parse().unwrap(),
+            4700,
+            4800,
+            c_tx,
+            i_tx,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn start_wrong_length_server_key_returns_error() {
+        use base64::prelude::*;
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("wg.key");
+        std::fs::write(&key, BASE64_STANDARD.encode([7u8; 16])).unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let result = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &key,
+            None,
+            "127.0.0.1".parse().unwrap(),
+            4700,
+            4800,
+            c_tx,
+            i_tx,
+        )
+        .await;
+        let err = result.err().expect("short key must be rejected");
+        assert!(err.to_string().contains("expected 32 bytes"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn start_corrupt_client_key_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("wg_client.key"), "garbage!!").unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let result = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &dir.path().join("wg.key"),
+            None,
+            "127.0.0.1".parse().unwrap(),
+            4700,
+            4800,
+            c_tx,
+            i_tx,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn start_udp_port_in_use_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_held, held_addr) = dummy_udp().await;
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let result = start(
+            "127.0.0.1".parse().unwrap(),
+            held_addr.port(),
+            &dir.path().join("wg.key"),
+            Some("127.0.0.1:1".into()),
+            "127.0.0.1".parse().unwrap(),
+            4700,
+            4800,
+            c_tx,
+            i_tx,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    // ── start() success path ──────────────────────────────────────────────────
+    //
+    // Paused time lets the 5 s discovery-probe timeout in `fetch_device_info`
+    // elapse instantly; the TCP fallback hits a closed loopback port.
+
+    #[tokio::test(start_paused = true)]
+    async fn start_with_explicit_endpoint_returns_matching_wg_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let port = closed_tcp_port();
+        let info = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &dir.path().join("wg.key"),
+            Some("vpn.example.test:51820".into()),
+            "127.0.0.1".parse().unwrap(),
+            port,
+            port,
+            c_tx,
+            i_tx,
+        )
+        .await
+        .unwrap();
+        assert!(info.enabled);
+        assert_eq!(info.endpoint, "vpn.example.test:51820");
+        assert!(
+            info.client_config
+                .contains("Endpoint = vpn.example.test:51820")
+        );
+        assert!(info.client_config.contains(&info.server_public_key));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn start_persists_server_and_client_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let port = closed_tcp_port();
+        let info = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &dir.path().join("wg.key"),
+            Some("h:1".into()),
+            "127.0.0.1".parse().unwrap(),
+            port,
+            port,
+            c_tx,
+            i_tx,
+        )
+        .await
+        .unwrap();
+        let reloaded = keys::WgKeypair::load_or_generate(&dir.path().join("wg.key")).unwrap();
+        assert_eq!(reloaded.public_key_b64(), info.server_public_key);
+        assert!(dir.path().join("wg_client.key").exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn start_without_endpoint_builds_endpoint_ending_in_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let (c_tx, _c_rx) = mpsc::channel(1);
+        let (i_tx, _i_rx) = mpsc::channel(1);
+        let port = closed_tcp_port();
+        let info = start(
+            "127.0.0.1".parse().unwrap(),
+            0,
+            &dir.path().join("wg.key"),
+            None,
+            "127.0.0.1".parse().unwrap(),
+            port,
+            port,
+            c_tx,
+            i_tx,
+        )
+        .await
+        .unwrap();
+        // Port 0 was passed through to WgInfo unchanged.
+        assert!(info.endpoint.ends_with(":0"), "got {}", info.endpoint);
+    }
+
+    // ── fetch_device_info_tcp() with a mock telescope ─────────────────────────
+
+    #[tokio::test]
+    async fn fetch_device_info_tcp_builds_response_from_device_state() {
+        let port = one_shot_tcp_server(
+            "{\"id\":999,\"result\":{\"device\":{\"sn\":\"ABC123\",\"product_model\":\"Seestar S50\"},\"ap\":{\"ssid\":\"S50_abc\"}}}\r\n",
+        )
+        .await;
+        let out = fetch_device_info_tcp("127.0.0.1".parse().unwrap(), port).await;
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["method"], "scan_iscope");
+        assert_eq!(v["result"]["sn"], "ABC123");
+        assert_eq!(v["result"]["product_model"], "Seestar S50");
+        assert_eq!(v["result"]["ssid"], "S50_abc");
+    }
+
+    #[tokio::test]
+    async fn fetch_device_info_tcp_missing_result_uses_placeholder_fields() {
+        let port = one_shot_tcp_server("{\"id\":999}\r\n").await;
+        let out = fetch_device_info_tcp("127.0.0.1".parse().unwrap(), port).await;
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["result"]["sn"], "unknown");
+        assert_eq!(v["result"]["product_model"], "Seestar");
+        assert_eq!(v["result"]["ssid"], "");
+    }
+
+    #[tokio::test]
+    async fn fetch_device_info_tcp_non_json_reply_returns_default() {
+        let port = one_shot_tcp_server("this is not json\r\n").await;
+        let out = fetch_device_info_tcp("127.0.0.1".parse().unwrap(), port).await;
+        assert_eq!(out, default_device_info());
+    }
+
+    #[tokio::test]
+    async fn fetch_device_info_tcp_connection_refused_returns_default() {
+        let out = fetch_device_info_tcp("127.0.0.1".parse().unwrap(), closed_tcp_port()).await;
+        assert_eq!(out, default_device_info());
+    }
+
+    // ── handle_decrypted_packet() response paths ──────────────────────────────
+
+    /// The tunnel has no session, so `encapsulate` yields a 148-byte handshake
+    /// initiation (type 1) — proof a response was produced and sent to the peer.
+    fn assert_handshake_init(d: &[u8]) {
+        assert_eq!(d.len(), 148);
+        assert_eq!(d[0], 1);
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_scan_iscope_sends_response_to_peer() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        let pkt = scan_request_packet(5555);
+        handle_decrypted_packet(&pkt, SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        assert_handshake_init(&recv_datagram(&peer_sock).await);
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_seestar_dns_query_sends_response_to_peer() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        let pkt = dns_query_packet("seestar.local");
+        handle_decrypted_packet(&pkt, SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        assert_handshake_init(&recv_datagram(&peer_sock).await);
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_icmp_echo_to_upstream_sends_reply_to_peer() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        let mut pkt = vec![0u8; 28];
+        pkt[0] = 0x45;
+        pkt[9] = 1;
+        pkt[12..16].copy_from_slice(&CLIENT_IP);
+        pkt[16..20].copy_from_slice(&SERVER_IP);
+        pkt[20] = 8;
+        handle_decrypted_packet(&pkt, SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        assert_handshake_init(&recv_datagram(&peer_sock).await);
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_non_seestar_dns_query_sends_nothing() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        let pkt = dns_query_packet("example.com");
+        handle_decrypted_packet(&pkt, SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        let mut buf = [0u8; 16];
+        assert!(peer_sock.try_recv_from(&mut buf).is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_discovery_with_other_method_sends_nothing() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        let pkt = udp_packet(
+            CLIENT_IP,
+            [255, 255, 255, 255],
+            5555,
+            crate::protocol::DISCOVERY_PORT,
+            br#"{"method":"get_device_state"}"#,
+        );
+        handle_decrypted_packet(&pkt, SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        let mut buf = [0u8; 16];
+        assert!(peer_sock.try_recv_from(&mut buf).is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_malformed_discovery_json_sends_nothing() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        let pkt = udp_packet(
+            CLIENT_IP,
+            [255, 255, 255, 255],
+            5555,
+            crate::protocol::DISCOVERY_PORT,
+            b"{not json",
+        );
+        handle_decrypted_packet(&pkt, SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        let mut buf = [0u8; 16];
+        assert!(peer_sock.try_recv_from(&mut buf).is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_decrypted_packet_empty_packet_sends_nothing() {
+        let (udp, _) = dummy_udp().await;
+        let (peer_sock, peer) = dummy_udp().await;
+        let mut tunn = make_test_tunn();
+        handle_decrypted_packet(&[], SERVER_IP, "{}", &mut tunn, &udp, peer).await;
+        let mut buf = [0u8; 16];
+        assert!(peer_sock.try_recv_from(&mut buf).is_err());
+    }
+
+    // ── packet_loop() ─────────────────────────────────────────────────────────
+
+    /// Spawn `packet_loop` on a loopback socket; returns the server's UDP
+    /// address, the inject receiver, and the egress sender.
+    async fn spawn_loop(
+        tunn: Tunn,
+        device_info: &str,
+    ) -> (
+        SocketAddr,
+        mpsc::Receiver<Vec<u8>>,
+        mpsc::Sender<Vec<u8>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (udp, addr) = dummy_udp().await;
+        let (inject_tx, inject_rx) = mpsc::channel(16);
+        let (egress_tx, egress_rx) = mpsc::channel(16);
+        let handle = tokio::spawn(packet_loop(
+            udp,
+            tunn,
+            netstack::NetStackChannels {
+                inject_tx,
+                egress_rx,
+            },
+            SERVER_IP,
+            device_info.to_string(),
+        ));
+        (addr, inject_rx, egress_tx, handle)
+    }
+
+    #[tokio::test]
+    async fn packet_loop_garbage_datagram_is_dropped_and_loop_keeps_running() {
+        let (server, _client) = make_tunn_pair();
+        let (addr, mut inject_rx, egress_tx, handle) = spawn_loop(server, "{}").await;
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client_sock
+            .send_to(&[0xde, 0xad, 0xbe, 0xef], addr)
+            .await
+            .unwrap();
+
+        // The garbage set peer_addr, so an egress packet now reaches the client
+        // as a handshake initiation — which also proves the loop is still alive.
+        // The loop may service the egress channel before the datagram, in which
+        // case that packet is dropped (no peer yet); re-offer until one is sent.
+        let mut buf = [0u8; 2048];
+        let n = loop {
+            egress_tx.send(vec![0x45; 20]).await.unwrap();
+            if let Ok(r) = tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                client_sock.recv_from(&mut buf),
+            )
+            .await
+            {
+                break r.unwrap().0;
+            }
+        };
+        assert_handshake_init(&buf[..n]);
+        assert!(
+            inject_rx.try_recv().is_err(),
+            "garbage must not be injected"
+        );
+        assert!(!handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn packet_loop_full_handshake_answers_discovery_in_both_session_states() {
+        let (server, mut client) = make_tunn_pair();
+        let device_info = r#"{"method":"scan_iscope","result":{"sn":"LOOP"}}"#;
+        let (addr, mut inject_rx, _egress_tx, _handle) = spawn_loop(server, device_info).await;
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut cbuf = vec![0u8; 4096];
+
+        // Client queues a discovery request; with no session this emits a
+        // handshake initiation.
+        let req = scan_request_packet(6001);
+        let init = match client.encapsulate(&req, &mut cbuf) {
+            TunnResult::WriteToNetwork(d) => d.to_vec(),
+            _ => panic!("expected handshake initiation"),
+        };
+        sock.send_to(&init, addr).await.unwrap();
+
+        // Server (inactive branch) answers with a handshake response.
+        let resp = recv_datagram(&sock).await;
+        let mut input: &[u8] = &resp;
+        loop {
+            match client.decapsulate(None, input, &mut cbuf) {
+                TunnResult::WriteToNetwork(d) => sock.send_to(d, addr).await.unwrap(),
+                TunnResult::Done => break,
+                _ => panic!("unexpected result while flushing client"),
+            };
+            input = &[];
+        }
+
+        // Read until the discovery reply arrives; decrypt it.
+        let first_port = discovery_reply_dst_port(&mut client, &sock).await;
+        assert_eq!(first_port, 6001);
+        let injected = inject_rx.recv().await.unwrap();
+        assert_eq!(injected, req, "decrypted request must reach the TCP stack");
+
+        // Session is now active: a second request goes through the active branch.
+        let req2 = scan_request_packet(6002);
+        let data = match client.encapsulate(&req2, &mut cbuf) {
+            TunnResult::WriteToNetwork(d) => d.to_vec(),
+            _ => panic!("expected transport data"),
+        };
+        sock.send_to(&data, addr).await.unwrap();
+        assert_eq!(discovery_reply_dst_port(&mut client, &sock).await, 6002);
+    }
+
+    /// Receive datagrams until one decrypts to an IPv4 packet whose UDP dst
+    /// port is not the periodic-announcement port; return that dst port.
+    async fn discovery_reply_dst_port(client: &mut Tunn, sock: &UdpSocket) -> u16 {
+        let mut out = vec![0u8; 4096];
+        loop {
+            let dg = recv_datagram(sock).await;
+            if let TunnResult::WriteToTunnelV4(p, _) = client.decapsulate(None, &dg, &mut out) {
+                let port = u16::from_be_bytes([p[22], p[23]]);
+                if port != crate::protocol::DISCOVERY_PORT {
+                    return port;
+                }
+            }
+        }
+    }
 }
 
 /// Handle a decrypted IP packet: check for discovery broadcasts and ICMP pings.
