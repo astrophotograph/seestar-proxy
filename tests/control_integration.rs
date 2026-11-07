@@ -679,3 +679,261 @@ async fn concurrent_clients_cannot_exceed_pending_map_limit() {
     assert_eq!(va["id"], 99999i64);
     assert_ne!(va["code"].as_i64().unwrap_or(0), 0);
 }
+
+// ── reconnect helpers ─────────────────────────────────────────────────────────
+
+/// One accepted proxy→telescope connection. Dropping it closes the socket,
+/// which the proxy sees as the telescope dying.
+struct TelescopeConn {
+    reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
+    writer: tokio::net::tcp::OwnedWriteHalf,
+}
+
+impl TelescopeConn {
+    /// Read the next line, parsed as JSON. `None` on timeout or EOF.
+    async fn next_line(&mut self, timeout: Duration) -> Option<serde_json::Value> {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = tokio::time::timeout(timeout, self.reader.read_line(&mut line))
+                .await
+                .ok()?
+                .ok()?;
+            if n == 0 {
+                return None;
+            }
+            if !line.trim().is_empty() {
+                return serde_json::from_str(line.trim()).ok();
+            }
+        }
+    }
+
+    /// Next client request, skipping heartbeat `test_connection` messages.
+    async fn next_request(&mut self) -> serde_json::Value {
+        loop {
+            let v = self
+                .next_line(Duration::from_secs(10))
+                .await
+                .expect("telescope connection closed or timed out waiting for a request");
+            if v["method"] != "test_connection" {
+                return v;
+            }
+        }
+    }
+
+    async fn send(&mut self, v: serde_json::Value) {
+        let line = format!("{}\r\n", serde_json::to_string(&v).unwrap());
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+        self.writer.flush().await.unwrap();
+    }
+}
+
+/// A mock telescope whose listener outlives each connection: every accepted
+/// connection is handed to the test, which can close it and then wait for the
+/// proxy to reconnect.
+struct ReconnectTelescope {
+    addr: SocketAddr,
+    conns: tokio::sync::mpsc::UnboundedReceiver<TelescopeConn>,
+}
+
+impl ReconnectTelescope {
+    async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, conns) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (r, writer) = stream.into_split();
+                let conn = TelescopeConn {
+                    reader: BufReader::new(r),
+                    writer,
+                };
+                if tx.send(conn).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { addr, conns }
+    }
+
+    /// Wait for the proxy to (re)connect. The proxy waits 5 s between attempts.
+    async fn accept(&mut self) -> TelescopeConn {
+        tokio::time::timeout(Duration::from_secs(15), self.conns.recv())
+            .await
+            .expect("proxy never (re)connected to the telescope")
+            .expect("listener task ended")
+    }
+}
+
+async fn start_proxy_with_metrics(
+    telescope_addr: SocketAddr,
+) -> (SocketAddr, Arc<seestar_proxy::metrics::Metrics>) {
+    let proxy_addr = free_addr();
+    let metrics = seestar_proxy::metrics::Metrics::new();
+    tokio::spawn(seestar_proxy::control::run(
+        proxy_addr,
+        Some(telescope_addr),
+        false,
+        None,
+        Some(metrics.clone()),
+        None,
+        None,
+    ));
+    wait_for_tcp(proxy_addr, Duration::from_secs(2)).await;
+    (proxy_addr, metrics)
+}
+
+// ── reconnect tests ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn upstream_drop_with_inflight_requests_returns_drain_error_to_each_client() {
+    let mut telescope = ReconnectTelescope::start().await;
+    let proxy_addr = start_proxy(telescope.addr).await;
+
+    let (mut r_a, mut w_a) = connect_client(proxy_addr).await;
+    let (mut r_b, mut w_b) = connect_client(proxy_addr).await;
+    w_a.write_all(b"{\"id\":11,\"method\":\"slow\"}\r\n")
+        .await
+        .unwrap();
+    w_b.write_all(b"{\"id\":22,\"method\":\"slow\"}\r\n")
+        .await
+        .unwrap();
+
+    // Telescope receives both requests, never answers, then dies.
+    let mut conn = telescope.accept().await;
+    conn.next_request().await;
+    conn.next_request().await;
+    drop(conn);
+
+    // Drain happens once the proxy has reconnected.
+    let _conn2 = telescope.accept().await;
+    let a = read_json(&mut r_a).await;
+    let b = read_json(&mut r_b).await;
+    let drain =
+        |id: i64| serde_json::json!({"id": id, "code": -1, "error": "telescope reconnecting"});
+    assert_eq!(a, drain(11));
+    assert_eq!(b, drain(22));
+}
+
+#[tokio::test]
+async fn request_after_reconnect_is_answered_with_original_client_id() {
+    let mut telescope = ReconnectTelescope::start().await;
+    let proxy_addr = start_proxy(telescope.addr).await;
+    let (mut r, mut w) = connect_client(proxy_addr).await;
+
+    w.write_all(b"{\"id\":1,\"method\":\"first\"}\r\n")
+        .await
+        .unwrap();
+    let mut conn = telescope.accept().await;
+    conn.next_request().await;
+    drop(conn);
+
+    let mut conn2 = telescope.accept().await;
+    // The in-flight request is drained with an error first.
+    assert_eq!(read_json(&mut r).await["code"], -1);
+
+    w.write_all(b"{\"id\":7,\"method\":\"second\"}\r\n")
+        .await
+        .unwrap();
+    let req = conn2.next_request().await;
+    assert_eq!(req["method"], "second");
+    assert_ne!(req["id"], 7, "proxy must remap the client id upstream");
+    conn2
+        .send(serde_json::json!({"id": req["id"], "code": 0, "result": "ok"}))
+        .await;
+
+    let resp = read_json(&mut r).await;
+    assert_eq!(resp["id"], 7);
+    assert_eq!(resp["result"], "ok");
+}
+
+#[tokio::test]
+async fn reconnect_resets_transient_telescope_state_but_keeps_battery_and_temp() {
+    let mut telescope = ReconnectTelescope::start().await;
+    let (proxy_addr, metrics) = start_proxy_with_metrics(telescope.addr).await;
+    let (mut r, mut w) = connect_client(proxy_addr).await;
+
+    // The request proves the client is subscribed before events are emitted,
+    // and doubles as the in-flight request whose drain error marks the reset.
+    w.write_all(b"{\"id\":1,\"method\":\"slow\"}\r\n")
+        .await
+        .unwrap();
+    let mut conn = telescope.accept().await;
+    conn.next_request().await;
+    conn.send(serde_json::json!({"Event": "Stack", "count": 5}))
+        .await;
+    conn.send(serde_json::json!({"Event": "AutoGoto"})).await;
+    conn.send(serde_json::json!({"Event": "PiStatus", "temp": 45.0, "battery_capacity": 80}))
+        .await;
+    for _ in 0..3 {
+        read_json(&mut r).await;
+    }
+    let before = metrics.telescope_status();
+    assert!(
+        before.is_stacking && before.is_goto,
+        "precondition: flags set"
+    );
+    assert_eq!(before.stack_count, 5);
+    drop(conn);
+
+    let _conn2 = telescope.accept().await;
+    // reset_telescope_state runs before the pending map is drained.
+    assert_eq!(read_json(&mut r).await["code"], -1);
+
+    let after = metrics.telescope_status();
+    assert!(!after.is_stacking);
+    assert!(!after.is_goto);
+    assert!(!after.is_homing);
+    assert_eq!(after.stack_count, 0);
+    assert_eq!(after.temperature, Some(45.0));
+    assert_eq!(after.battery, Some(80));
+}
+
+#[tokio::test]
+async fn heartbeat_after_reconnect_waits_for_first_telescope_message() {
+    let mut telescope = ReconnectTelescope::start().await;
+    let proxy_addr = start_proxy(telescope.addr).await;
+    let (mut r, mut w) = connect_client(proxy_addr).await;
+
+    // Complete the handshake on the first connection, then kill it.
+    w.write_all(b"{\"id\":1,\"method\":\"hello\"}\r\n")
+        .await
+        .unwrap();
+    let mut conn = telescope.accept().await;
+    conn.next_request().await;
+    conn.send(serde_json::json!({"Event": "PiStatus", "temp": 1.0}))
+        .await;
+    read_json(&mut r).await; // proxy has processed it => handshake_done is set
+    drop(conn);
+
+    // While the link was down, one heartbeat tick fired with the handshake
+    // still marked done; that message stays queued and is flushed first on the
+    // new connection. Any heartbeat beyond it means the gate did not re-arm.
+    let mut conn2 = telescope.accept().await;
+    let mut heartbeats = 0;
+    // Fixed observation window (> one 5 s heartbeat interval) so a missing gate
+    // fails the assertion instead of looping forever.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
+    while let Some(left) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+        let Some(v) = conn2.next_line(left).await else {
+            break;
+        };
+        if v["method"] == "test_connection" {
+            heartbeats += 1;
+        }
+    }
+    assert!(
+        heartbeats <= 1,
+        "heartbeats sent before the telescope's first message: {heartbeats}"
+    );
+
+    // Once the telescope speaks, the heartbeat resumes.
+    conn2
+        .send(serde_json::json!({"Event": "PiStatus", "temp": 2.0}))
+        .await;
+    let v = conn2
+        .next_line(Duration::from_secs(7))
+        .await
+        .expect("heartbeat should resume after the first telescope message");
+    assert_eq!(v["method"], "test_connection");
+}
