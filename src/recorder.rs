@@ -367,4 +367,18 @@ mod tests {
         assert_eq!(m["preview_frame_count"], 0);
         assert_eq!(m["stack_frame_count"], 0);
     }
+
+    #[tokio::test]
+    async fn record_control_without_finalize_is_readable_on_disk_and_has_no_manifest() {
+        // Simulates an abrupt kill: finalize() is never called.
+        let dir = unique_test_dir();
+        let rec = Recorder::new(&dir).await.unwrap();
+        rec.record_control("client", r#"{"id":1}"#).await;
+        rec.record_control("telescope", r#"{"id":1,"result":0}"#)
+            .await;
+
+        let text = std::fs::read_to_string(dir.join("control.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(!dir.join("manifest.json").exists());
+    }
 }

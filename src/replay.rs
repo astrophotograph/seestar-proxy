@@ -478,4 +478,25 @@ mod tests {
             assert_eq!(frame.len(), HEADER_SIZE + 2000);
         }
     }
+
+    #[test]
+    fn load_missing_manifest_with_valid_control_returns_helpful_error() {
+        // Characterizes doc/bugs/crashed-session-manifest.md: a crashed recording
+        // (control.jsonl but no manifest.json) is currently unloadable.
+        let dir = unique_test_dir();
+        std::fs::create_dir_all(dir.join("frames")).unwrap();
+        std::fs::write(
+            dir.join("control.jsonl"),
+            "{\"timestamp\":1.0,\"direction\":\"telescope\",\"raw\":\"{}\"}\n",
+        )
+        .unwrap();
+
+        let err = ReplaySession::load(&dir).err().expect("load must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("manifest.json"), "{msg}");
+        assert!(
+            msg.contains("is this a valid recording directory?"),
+            "{msg}"
+        );
+    }
 }
