@@ -937,3 +937,65 @@ async fn heartbeat_after_reconnect_waits_for_first_telescope_message() {
         .expect("heartbeat should resume after the first telescope message");
     assert_eq!(v["method"], "test_connection");
 }
+
+// ── event lag recovery ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn slow_client_lagging_event_broadcast_keeps_receiving_later_events() {
+    const FLOOD: u64 = 2000;
+    let mut telescope = ReconnectTelescope::start().await;
+    let proxy_addr = start_proxy(telescope.addr).await;
+    let mut conn = telescope.accept().await;
+
+    let (mut reader, mut writer) = connect_client(proxy_addr).await;
+
+    // Round-trip a request so the client handler is known to be subscribed to
+    // the event broadcast before any event is emitted.
+    writer
+        .write_all(b"{\"id\":1,\"method\":\"hello\"}\r\n")
+        .await
+        .unwrap();
+    let req = conn.next_request().await;
+    conn.send(serde_json::json!({"id": req["id"], "code": 0}))
+        .await;
+    assert_eq!(read_json(&mut reader).await["code"], 0);
+
+    // Flood large events while the client does not read. The socket buffers
+    // fill, the proxy's writer task blocks, and the 256-slot broadcast
+    // overflows for this subscriber.
+    let padding = "x".repeat(16 * 1024);
+    let flood = tokio::spawn(async move {
+        for seq in 0..FLOOD {
+            conn.send(serde_json::json!({"Event": "Flood", "seq": seq, "pad": padding}))
+                .await;
+        }
+        conn.send(serde_json::json!({"Event": "Final"})).await;
+        conn
+    });
+    let mut conn = flood.await.unwrap();
+
+    // Drain: the client must reach the post-lag Final event.
+    let mut flood_seen = 0u64;
+    loop {
+        let v = read_json(&mut reader).await;
+        match v["Event"].as_str() {
+            Some("Flood") => flood_seen += 1,
+            Some("Final") => break,
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+    assert!(
+        flood_seen < FLOOD,
+        "expected the client to lag and miss events, but saw all {flood_seen}"
+    );
+
+    // The connection is still alive: a new request gets its response.
+    writer
+        .write_all(b"{\"id\":2,\"method\":\"again\"}\r\n")
+        .await
+        .unwrap();
+    let req = conn.next_request().await;
+    conn.send(serde_json::json!({"id": req["id"], "code": 0}))
+        .await;
+    assert_eq!(read_json(&mut reader).await["code"], 0);
+}
