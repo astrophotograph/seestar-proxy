@@ -387,4 +387,83 @@ mod tests {
         set_json_rpc_id_value(&mut msg, serde_json::Value::from(-1i64));
         assert_eq!(msg["id"], -1i64);
     }
+
+    // ── Property tests ────────────────────────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    fn arb_id() -> impl Strategy<Value = Value> {
+        prop_oneof![
+            any::<u64>().prop_map(Value::from),
+            any::<i64>().prop_map(Value::from),
+            ".*".prop_map(Value::from),
+            any::<f64>().prop_filter_map("finite", |f| serde_json::Number::from_f64(f)
+                .map(Value::Number)),
+            Just(Value::Null),
+        ]
+    }
+
+    fn header_buf(size: u32, code: u8, id: u8, width: u16, height: u16) -> [u8; HEADER_SIZE] {
+        let mut buf = [0u8; HEADER_SIZE];
+        buf[6..10].copy_from_slice(&size.to_be_bytes());
+        buf[14] = code;
+        buf[15] = id;
+        buf[16..18].copy_from_slice(&width.to_be_bytes());
+        buf[18..20].copy_from_slice(&height.to_be_bytes());
+        buf
+    }
+
+    proptest! {
+        #[test]
+        fn frame_header_parse_arbitrary_fields_round_trips(
+            size in any::<u32>(), code in any::<u8>(), id in any::<u8>(),
+            width in any::<u16>(), height in any::<u16>(),
+        ) {
+            let h = FrameHeader::parse(&header_buf(size, code, id, width, height));
+            prop_assert_eq!(h.size, size);
+            prop_assert_eq!(h.code, code);
+            prop_assert_eq!(h.id, id);
+            prop_assert_eq!(h.width, width);
+            prop_assert_eq!(h.height, height);
+        }
+
+        #[test]
+        fn id_remap_arbitrary_original_restores_exactly(orig in arb_id(), new_id in any::<u64>()) {
+            let mut msg = serde_json::json!({"method": "m"});
+            msg["id"] = orig.clone();
+            match get_id(&msg).cloned() {
+                None => prop_assert!(orig.is_null()),
+                Some(saved) => {
+                    set_json_rpc_id(&mut msg, new_id);
+                    prop_assert_eq!(json_rpc_id(&msg), Some(new_id));
+                    set_json_rpc_id_value(&mut msg, saved);
+                    prop_assert_eq!(&msg["id"], &orig);
+                    prop_assert_eq!(&msg["method"], "m");
+                }
+            }
+        }
+
+        #[test]
+        fn is_image_arbitrary_values_matches_threshold_rule(
+            size in prop_oneof![any::<u32>(), 990u32..1010],
+            width in prop_oneof![any::<u16>(), 0u16..3],
+            height in prop_oneof![any::<u16>(), 0u16..3],
+        ) {
+            let h = FrameHeader::parse(&header_buf(size, 0, 0, width, height));
+            prop_assert_eq!(h.is_image(), width > 0 && height > 0 && size > 1000);
+        }
+
+        /// Pins the current asymmetry: `json_rpc_id` is u64-only while `get_id`
+        /// accepts any non-null id. Do not "fix" one without the other.
+        #[test]
+        fn json_rpc_id_vs_get_id_non_u64_ids_asymmetry_is_pinned(orig in arb_id()) {
+            let msg = serde_json::json!({"id": orig.clone()});
+            prop_assert_eq!(json_rpc_id(&msg), orig.as_u64());
+            prop_assert_eq!(get_id(&msg).is_some(), !orig.is_null());
+            if !orig.is_null() && orig.as_u64().is_none() {
+                prop_assert_eq!(json_rpc_id(&msg), None);
+                prop_assert!(get_id(&msg).is_some());
+            }
+        }
+    }
 }
