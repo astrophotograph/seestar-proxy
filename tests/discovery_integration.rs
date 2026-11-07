@@ -188,18 +188,22 @@ async fn discovery_bridge_end_to_end() {
     assert_eq!(response["result"]["sn"], "TEST001");
 }
 
-/// When the upstream probe times out, `run()` should return an error
-/// (no telescope available). This test verifies that the function does not
-/// panic and produces a meaningful error.
+/// When the upstream probe and its TCP fallback both fail (nothing listening),
+/// `run()` must not error: it serves the minimal "proxy" fallback identity.
+/// Pins which fields are present and absent versus a successful probe or a
+/// configured identity.
+///
+/// Real time: `probe_upstream` has a hard-coded 5 s UDP timeout, so this test
+/// takes ~5 s. Loopback only (127.0.0.3 proxy, 127.0.0.4 silent upstream).
 #[tokio::test]
-async fn discovery_probe_timeout_returns_error() {
-    // Point at a loopback address with nothing listening on 4720.
-    // probe_upstream will time out after 5 s; we use a separate loopback
-    // address to avoid conflicting with any running discovery tests.
-    //
-    // Note: we don't actually wait 5 s here — we spawn the task and just
-    // check it eventually finishes with an error. The task's internal timeout
-    // controls timing.
+async fn discovery_probe_timeout_serves_minimal_fallback_response() {
+    if tokio::net::UdpSocket::bind("127.0.0.3:0").await.is_err()
+        || tokio::net::UdpSocket::bind("127.0.0.4:0").await.is_err()
+    {
+        eprintln!("SKIP: 127.0.0.3/127.0.0.4 not available");
+        return;
+    }
+
     let bind_addr: IpAddr = "127.0.0.3".parse().unwrap();
     let upstream_addr: IpAddr = "127.0.0.4".parse().unwrap(); // nothing on :4720
 
@@ -212,21 +216,61 @@ async fn discovery_probe_timeout_returns_error() {
         None,
     ));
 
-    // probe_upstream gives a minimal fallback after a 5 s timeout, so run()
-    // won't fail — it will proceed with minimal info.  We verify it starts
-    // listening, or at worst completes with an Ok.
-    //
-    // We give it a short window: if it hasn't errored in 100 ms it is either
-    // still probing (normal) or running (also fine).
-    let result = tokio::time::timeout(Duration::from_millis(100), handle).await;
-    match result {
-        // Task finished quickly (bind error etc.) — must not panic.
-        Ok(join_result) => {
-            let _ = join_result; // Ok or Err both acceptable
+    // Poll until the bridge answers (after the 5 s probe timeout), bounded at 15 s.
+    let proxy_sock_addr = format!("127.0.0.3:{DISCOVERY_PORT}");
+    let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let req = serde_json::to_vec(&serde_json::json!({
+        "id": 201, "method": "scan_iscope", "name": "testclient", "ip": "0.0.0.0"
+    }))
+    .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut buf = [0u8; 4096];
+    let (n, src) = loop {
+        assert!(
+            !handle.is_finished(),
+            "run() must not exit when the probe times out"
+        );
+        client
+            .send_to(&req, proxy_sock_addr.as_str())
+            .await
+            .unwrap();
+        if let Ok(r) =
+            tokio::time::timeout(Duration::from_millis(250), client.recv_from(&mut buf)).await
+        {
+            break r.unwrap();
         }
-        // Still running (probe in progress or bridge listening) — that's fine.
-        Err(_timeout) => {}
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no fallback discovery response within 15 s"
+        );
+    };
+
+    let response: serde_json::Value = serde_json::from_slice(&buf[..n]).unwrap();
+    assert_eq!(src.ip().to_string(), "127.0.0.3");
+
+    // Envelope.
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["method"], "scan_iscope");
+    assert_eq!(response["id"], 201);
+    assert_eq!(response["code"], 0);
+    assert_eq!(response["Timestamp"], "0");
+
+    // Present: minimal placeholder identity, with ip patched to the proxy.
+    let result = response["result"].as_object().expect("result object");
+    assert_eq!(result["product_model"], "Seestar (via proxy)");
+    assert_eq!(result["sn"], "proxy");
+    assert_eq!(result["ssid"], "Seestar_proxy");
+    assert_eq!(result["is_verified"], true);
+    assert_eq!(result["tcp_client_num"], 0);
+    assert_eq!(result["ip"], "127.0.0.3");
+
+    // Absent: fields only a real/configured identity carries.
+    for key in ["bssid", "serc", "can_star_mode_sel_cam"] {
+        assert!(!result.contains_key(key), "fallback must not include {key}");
     }
+    assert_eq!(result.len(), 6, "unexpected extra fields: {result:?}");
+
+    handle.abort();
 }
 
 /// When `telescope_sn` is provided, `run()` must skip the upstream probe and
